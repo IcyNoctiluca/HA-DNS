@@ -82,18 +82,18 @@ sudo tailscale set --advertise-routes=10.253.53.53/32
 
 ### Inventory Role Mapping
 
-| Role | Machine | Site | Notes |
-|---|---|---|---|
-| **DNS edge node** | Pi 5 Rack D | AMS-01 | Always-on, wired, Linux. Primary AMS edge. Also runs Pi-hole for AMS LAN. |
-| **DNS edge node** | TOR-01 Pi 5 | TOR-01 | Always-on, 1 Gbps WAN. Primary remote edge. Also runs Pi-hole for TOR-01 LAN. |
-| **DNS edge node** | TOR-02 Pi 5 | TOR-02 | Always-on. Third edge. Also runs Pi-hole for TOR-02 LAN. |
-| **AGH config sync daemon** | Mac Studio | AMS-01 | Runs adguardhome-sync in Docker (OrbStack). Pulls from dns-ams-01 AGH, pushes to all replicas. |
-| **AGH backend (future)** | HOU-01 Pi 5 | HOU-01 | Add to dnsdist pool once provisioned. Does not need to advertise VIP. |
-| **AGH backend (future)** | SHZ-01 Pi 5 | SHZ-01 | Same. |
-| **AGH backend (future)** | IOM-01 Pi 5 | IOM-01 | Backend-only given slower WAN; do not promote to edge. |
-| **Not involved** | k3s Rack A/B/C | AMS-01 | DNS must not depend on k3s availability. |
-| **Not involved** | All wake-on-demand machines | AMS-01 | Never advertise the VIP from machines that sleep or reboot casually. |
-| **Not a DNS edge** | Mac Studio | AMS-01 | Sync daemon role only. Too many critical services to also be a DNS edge; macOS loopback VIP binding is more complex. |
+| Role | Machine | Site | Region | Notes |
+|---|---|---|---|---|
+| **DNS edge node** | Pi 5 Rack D | AMS-01 | EU | Always-on, wired, Linux. Primary EU edge. Also runs Pi-hole for AMS LAN. High tinkering risk — IOM edge provides EU continuity when AMS is broken. |
+| **DNS edge node** | IOM-01 Pi 5 | IOM-01 | EU | EU secondary edge. Slower WAN but reliable. Advertises VIP; runs dnsdist + watchdog + AGH. Activates as EU primary when AMS is down. |
+| **DNS edge node** | TOR-01 Pi 5 | TOR-01 | NA | Always-on, 1 Gbps WAN. Sole NA edge. Also runs Pi-hole for TOR-01 LAN. |
+| **DNS edge node** | SHZ-01 Pi 5 | SHZ-01 | APAC | Sole APAC edge. Also runs the only APAC AGH instance. No intra-region failover. |
+| **AGH backend only** | TOR-02 Pi 5 | TOR-02 | NA | NA AGH backend. Does not advertise VIP or run dnsdist. Also runs Pi-hole for TOR-02 LAN. |
+| **AGH backend only (future)** | HOU-01 Pi 5 | HOU-01 | NA | NA AGH backend once provisioned. Does not advertise VIP. |
+| **AGH config sync daemon** | Mac Studio | AMS-01 | — | Runs adguardhome-sync in Docker (OrbStack). Pulls from dns-ams-01 AGH, pushes to all replicas globally. |
+| **Not involved** | k3s Rack A/B/C | AMS-01 | — | DNS must not depend on k3s availability. |
+| **Not involved** | All wake-on-demand machines | AMS-01 | — | Never advertise the VIP from machines that sleep or reboot casually. |
+| **Not a DNS edge** | Mac Studio | AMS-01 | — | Sync daemon role only. Too many critical services to also be a DNS edge; macOS loopback VIP binding is more complex. |
 
 ---
 
@@ -125,16 +125,40 @@ Pi-hole's upstream is set to `127.0.0.1#5335` (local Unbound). AGH's upstream is
 
 ---
 
+### Regional Topology
+
+AGH backends are organised by region. Each DNS edge routes only to AGH instances within its own region — a regional AGH outage does not affect other regions. All AGH instances remain globally identical for filtering behaviour via adguardhome-sync; only the routing is regional.
+
+```
+EU region  — 2 edges, 2 AGH backends
+  dns-ams-01 (NL)  →  pool: agh-ams-01 (order=10), agh-iom-01 (order=20)
+  dns-iom-01 (IOM) →  pool: agh-iom-01 (order=10), agh-ams-01 (order=20)
+
+NA region  — 1 edge, 3 AGH backends
+  dns-tor-01 (TOR) →  pool: agh-tor-01 (order=10), agh-tor-02 (order=20), agh-hou-01 (order=30, future)
+
+APAC region  — 1 edge, 1 AGH backend
+  dns-shz-01 (SHZ) →  pool: agh-shz-01 (order=10)
+```
+
+No cross-region fallback is configured. If an entire regional AGH pool is unavailable, DNS fails for clients routed to that region's edge — which is the correct fail-closed behaviour. Tailscale will route those clients to the next available edge (most likely EU) within ~15s, where EU AGH will serve them correctly.
+
+A note on Tailscale routing: on the free tier, there is no geographic client-to-edge affinity guarantee. The oldest-enrolled edge node is Tailscale's primary for all clients. In practice, when a primary edge is unreachable, Tailscale converges to the nearest available edge, so regional routing is approximate rather than strict. Regional routing preference is an Enterprise feature.
+
+---
+
 ### AdGuard Home Backend Pool
 
-The AGH instances across all edge nodes are kept identical by adguardhome-sync, making them fungible — dnsdist can route to any healthy instance and the result is always the same. Configuration changes are made once on dns-ams-01 and propagate to all replicas within 5 minutes.
+All AGH instances are kept globally identical by adguardhome-sync — same blocklists, allowlists, rewrites, and client settings — making them fully fungible within their region. Configuration changes are made once on dns-ams-01 and propagate to all replicas within 5 minutes.
 
 ```
 dns-ams-01 AGH   ← primary (make all config changes here)
-      ↓  adguardhome-sync (Mac Studio Docker)
-dns-tor-01 AGH   ← replica
-dns-tor-02 AGH   ← replica
-dns-hou-01 AGH   ← replica (when provisioned)
+      ↓  adguardhome-sync (Mac Studio Docker, global sync)
+dns-iom-01 AGH   ← EU replica
+dns-tor-01 AGH   ← NA replica
+dns-tor-02 AGH   ← NA replica
+dns-shz-01 AGH   ← APAC replica
+dns-hou-01 AGH   ← NA replica (when provisioned)
 ```
 
 adguardhome-sync replicates blocklists, allowlists, rewrites, and client settings. It does not replicate query logs — each instance's query log reflects only traffic routed to it by dnsdist.
@@ -143,16 +167,27 @@ adguardhome-sync replicates blocklists, allowlists, rewrites, and client setting
 
 ### dnsdist Backend Pool
 
-dnsdist on each edge node routes to all AGH instances via their non-standard port. There is no unfiltered Unbound fallback — if all AGH backends are down, DNS fails. This is deliberate: silent failover to unfiltered DNS contradicts the stated goal and masks a serious infrastructure problem.
+Each edge's dnsdist routes only to its regional AGH pool. There is no unfiltered Unbound fallback — if all regional AGH backends are down, DNS fails for that edge. This is deliberate: silent failover to unfiltered DNS contradicts the stated goal and masks a serious infrastructure problem.
 
 ```
-Pool on dns-ams-01:
-  1. AGH on dns-ams-01  →  127.0.0.1:5353  (local, lowest latency — preferred, order=10)
-  2. AGH on dns-tor-01  →  TOR01_TS_IP:5353  (order=20)
-  3. AGH on dns-tor-02  →  TOR02_TS_IP:5353  (order=30)
+dns-ams-01 pool (EU):
+  agh-ams-01  →  127.0.0.1:5353      (local, order=10)
+  agh-iom-01  →  IOM01_TS_IP:5353   (order=20)
+
+dns-iom-01 pool (EU):
+  agh-iom-01  →  127.0.0.1:5353      (local, order=10)
+  agh-ams-01  →  AMS01_TS_IP:5353   (order=20)
+
+dns-tor-01 pool (NA):
+  agh-tor-01  →  127.0.0.1:5353      (local, order=10)
+  agh-tor-02  →  TOR02_TS_IP:5353   (order=20)
+  agh-hou-01  →  HOU01_TS_IP:5353   (order=30, add when provisioned)
+
+dns-shz-01 pool (APAC):
+  agh-shz-01  →  127.0.0.1:5353      (local, order=10)
 ```
 
-Each edge carries the same pool, ordered with its own local AGH first. Adding a new AZ node is a one-line change to each edge's dnsdist.conf followed by a restart.
+Adding a new AGH backend to a region means adding one line to each edge in that region's dnsdist.conf and restarting dnsdist.
 
 ---
 
@@ -216,27 +251,41 @@ Phase 2 path (optional, future):
 
 | Failure | Detection | Effect |
 |---|---|---|
-| One AGH backend goes down | dnsdist health check (~1s) | Routes to next healthy backend. No client impact. |
-| dnsdist crashes on an edge node | Watchdog: 3 failed probes (~15s) | Watchdog withdraws 10.253.53.53/32. Tailscale fails over to next edge. ~15–30s max disruption for tailnet clients. |
-| Entire Pi 5 Rack D goes down | Tailscale node disconnects (~15s) | Tailscale fails over to dns-tor-01. AMS LAN Pi-hole also down — LAN clients lose DNS until node recovers. |
-| AMS total power outage | Tailscale node disconnects | HA DNS continues via TOR-01 and TOR-02. AMS LAN DNS down until power returns. |
-| All three edge nodes down simultaneously | None | HA DNS broken for tailnet clients. Each LAN's Pi-hole continues working independently. |
-| AGH config drifts between sites | adguardhome-sync corrects within 5 minutes | No functional impact while within the sync window. |
+| One regional AGH backend goes down | dnsdist health check (~1s) | Routes to next healthy backend in the same region. No client impact. |
+| All AGH backends in a region go down | dnsdist health check (~1s) | DNS fails for clients on that region's edge. Tailscale routes them to the next available edge (~15s), which serves from its own regional pool. Filtering remains active. |
+| dnsdist crashes on an edge node | Watchdog: 3 failed probes (~15s) | Watchdog withdraws 10.253.53.53/32 on that node. Tailscale fails over to next edge (~15s). ~15–30s max disruption. |
+| dns-ams-01 goes down (AMS tinkering, power, hardware) | Tailscale node disconnects (~15s) | Tailscale fails over to dns-iom-01. EU DNS continues uninterrupted from IOM's pool. AMS LAN Pi-hole also down — AMS LAN clients lose DNS until node recovers. |
+| dns-iom-01 goes down | Tailscale node disconnects (~15s) | EU DNS continues on dns-ams-01. No tailnet impact. |
+| AMS total power outage (dns-ams-01 + agh-ams-01 down) | Tailscale node disconnects | dns-iom-01 takes over EU. Its pool falls back to agh-iom-01 only (agh-ams-01 is also down). EU DNS continues, single AGH backend. |
+| dns-tor-01 goes down (sole NA edge) | Tailscale node disconnects (~15s) | Tailscale routes NA clients to nearest remaining edge (most likely EU). NA LAN Pi-hole down until node recovers. |
+| dns-shz-01 goes down (sole APAC edge) | Tailscale node disconnects (~15s) | Tailscale routes APAC clients to EU. APAC LAN Pi-hole down until node recovers. |
+| All EU edges down simultaneously | Tailscale node disconnects | Tailscale clients route to NA or APAC. HA DNS continues. EU LAN Pi-holes down until power/nodes recover. |
+| All edge nodes down simultaneously | None | HA DNS broken for all tailnet clients. Each LAN's Pi-hole continues working independently. |
+| AGH config drifts between regions | adguardhome-sync corrects within 5 minutes | No functional impact within the sync window. |
+| Mac Studio goes down | None | adguardhome-sync pauses globally. DNS continues normally. Config changes must be made manually on each AGH instance until Mac Studio recovers. |
 | k3s cluster goes down | k3s events | No DNS impact. DNS does not depend on k3s. |
-| Mac Studio goes down | None | adguardhome-sync pauses. DNS continues normally. Config changes must be made manually on each AGH instance until Mac Studio recovers. |
-| Pi-hole goes down on an edge node | None (independent system) | AMS LAN DNS broken until Pi-hole recovers. HA tailnet DNS unaffected. |
+| Pi-hole goes down on any node | None (independent system) | That LAN's local DNS broken until Pi-hole recovers. HA tailnet DNS unaffected. |
 
 ---
 
 ### Adding Future AZ Nodes
 
-When HOU-01, SHZ-01, or IOM-01 comes online:
+**Adding an AGH backend to an existing region (e.g. HOU-01 to NA):**
 
-1. Install Pi-hole (LAN DNS, independent — no changes to existing design).
-2. Install AdGuard Home on port 5353. It will receive config from adguardhome-sync automatically once added to the sync config on the Mac Studio.
-3. Install Unbound on `127.0.0.1:5335`; set as upstream for both Pi-hole and AGH.
-4. Add the node's Tailscale IP as a new backend (`AGH_IP:5353`) in each edge node's dnsdist.conf and restart dnsdist.
-5. The node does **not** need to advertise `10.253.53.53/32` unless promoted to a full DNS edge. For IOM-01 (slower WAN), backend-only is the right permanent role.
+1. Install Pi-hole in BIND mode (LAN DNS, independent).
+2. Install Unbound on `127.0.0.1:5335`; set as upstream for both Pi-hole and AGH.
+3. Install AdGuard Home on restricted `:5353`. Add it to adguardhome-sync on the Mac Studio — it will receive the full config automatically.
+4. Add the node's Tailscale IP as a new backend in the **regional edge's** dnsdist.conf only (e.g. add HOU-01 to dns-tor-01's pool). Do not add it to other regions' pools.
+5. The node does **not** advertise `10.253.53.53/32` and does not run dnsdist or the watchdog.
+
+**Promoting a node to a DNS edge (e.g. adding a second NA edge):**
+
+Follow the same steps above, then additionally:
+1. Assign `tag:dns-edge` in Tailscale admin.
+2. Install dnsdist with the regional pool config for that region.
+3. Bind VIP to loopback and install the watchdog.
+4. Advertise `10.253.53.53/32` — route auto-approves via tag.
+5. Add this edge's local AGH as a backend to the other edge in the same region (and vice versa), so both edges share the full regional pool.
 
 ---
 
@@ -244,14 +293,16 @@ When HOU-01, SHZ-01, or IOM-01 comes online:
 
 Set hostnames before Tailscale enrolment so MagicDNS names are clean:
 
-| Hostname | Machine |
-|---|---|
-| `dns-ams-01` | Pi 5 Rack D (AMS-01) |
-| `dns-tor-01` | TOR-01 Pi 5 |
-| `dns-tor-02` | TOR-02 Pi 5 |
-| `dns-hou-01` | HOU-01 Pi 5 (future) |
-| `dns-shz-01` | SHZ-01 Pi 5 (future) |
-| `dns-iom-01` | IOM-01 Pi 5 (future) |
+| Hostname | Machine | Role |
+|---|---|---|
+| `dns-ams-01` | Pi 5 Rack D (AMS-01) | EU primary edge |
+| `dns-iom-01` | IOM-01 Pi 5 | EU secondary edge |
+| `dns-tor-01` | TOR-01 Pi 5 | NA edge |
+| `dns-shz-01` | SHZ-01 Pi 5 | APAC edge |
+| `dns-tor-02` | TOR-02 Pi 5 | NA AGH backend only (no VIP, no dnsdist) |
+| `dns-hou-01` | HOU-01 Pi 5 (future) | NA AGH backend only |
+
+Nodes that are AGH backends only (`dns-tor-02`, `dns-hou-01`) run Pi-hole, Unbound, and AGH on `:5353` — but not dnsdist, the watchdog, or the loopback VIP alias.
 
 ---
 
@@ -383,14 +434,20 @@ server:
 
 ### dnsdist — `/etc/dnsdist/dnsdist.conf`
 
-Replace placeholder IPs with real values from `tailscale status`.
+Each edge node gets its own config containing only its regional AGH pool. Four variants are shown below. Replace placeholder IPs with real values from `tailscale status`.
 
 Notes:
 - `order=` is explicit on every backend so intent is unambiguous regardless of declaration order.
-- No Unbound fallback — design fails closed if all AGH backends are down.
+- No Unbound fallback — design fails closed if all regional AGH backends are down.
 - Packet cache is disabled initially; AGH and Unbound already cache. Enable only if latency or load later justifies it (note: enabling cache makes AGH query logs incomplete for tailnet clients).
 
+The preamble (bind, ACL, policy, webserver) is identical on all edges — only the `newServer` pool entries differ.
+
 ```lua
+-- ============================================================
+-- PREAMBLE — identical on all edge nodes
+-- ============================================================
+
 -- Bind to VIP on loopback only
 setLocal("10.253.53.53:53")
 
@@ -402,54 +459,48 @@ setACL({
   "172.16.0.0/12",
 })
 
--- Backend pool: AdGuard Home instances on port 5353
--- order= is explicit; firstAvailable picks the lowest-order healthy backend.
-
--- Local AGH (same machine — no Tailscale hop, always preferred)
-newServer({
-  address     = "127.0.0.1:5353",
-  name        = "agh-local",
-  order       = 10,
-  checkName   = "cloudflare.com.",
-  checkType   = "A",
-  mustResolve = true,
-})
-
-newServer({
-  address     = "TOR01_TS_IP:5353",
-  name        = "agh-tor-01",
-  order       = 20,
-  checkName   = "cloudflare.com.",
-  checkType   = "A",
-  mustResolve = true,
-})
-
-newServer({
-  address     = "TOR02_TS_IP:5353",
-  name        = "agh-tor-02",
-  order       = 30,
-  checkName   = "cloudflare.com.",
-  checkType   = "A",
-  mustResolve = true,
-})
-
--- Add future AZ nodes here (increment order by 10 per node):
--- newServer({ address="HOU01_TS_IP:5353", name="agh-hou-01", order=40, checkName="cloudflare.com.", checkType="A", mustResolve=true })
-
--- NOTE: No unfiltered Unbound fallback. If all AGH backends are down, DNS fails.
--- This is intentional — see Goals section.
-
 setServerPolicy(firstAvailable)
 
 -- Packet cache disabled until design is stable.
--- AGH and Unbound already cache; adding dnsdist cache here would make AGH
--- query logs incomplete (dnsdist answers repeats before they reach AGH).
--- To enable later: uncomment the lines below.
+-- AGH and Unbound already cache; enabling here makes AGH logs incomplete.
 -- pc = newPacketCache(10000, { maxTTL = 300, minTTL = 30 })
 -- getPool(""):setCache(pc)
 
 webserver("127.0.0.1:8083")
 setWebserverConfig({ password = "changeme", apiKey = "changeme" })
+
+-- ============================================================
+-- POOL — replace section below per edge node
+-- ============================================================
+```
+
+**dns-ams-01 (EU primary):**
+```lua
+newServer({ address="127.0.0.1:5353",    name="agh-ams-01", order=10, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+newServer({ address="IOM01_TS_IP:5353",  name="agh-iom-01", order=20, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+-- No cross-region backends. Fails closed if both EU AGH instances are down.
+```
+
+**dns-iom-01 (EU secondary):**
+```lua
+newServer({ address="127.0.0.1:5353",    name="agh-iom-01", order=10, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+newServer({ address="AMS01_TS_IP:5353",  name="agh-ams-01", order=20, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+-- No cross-region backends.
+```
+
+**dns-tor-01 (NA):**
+```lua
+newServer({ address="127.0.0.1:5353",    name="agh-tor-01", order=10, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+newServer({ address="TOR02_TS_IP:5353",  name="agh-tor-02", order=20, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+-- Add HOU when provisioned:
+-- newServer({ address="HOU01_TS_IP:5353", name="agh-hou-01", order=30, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+-- No cross-region backends.
+```
+
+**dns-shz-01 (APAC):**
+```lua
+newServer({ address="127.0.0.1:5353",    name="agh-shz-01", order=10, checkName="cloudflare.com.", checkType="A", mustResolve=true })
+-- Single-node APAC region. If AGH fails here, Tailscale routes APAC clients to EU.
 ```
 
 ---
@@ -487,13 +538,19 @@ origin:
   password: CHANGE_ME
 
 replicas:
-  - url: http://TOR01_TS_IP:3000
+  - url: http://IOM01_TS_IP:3000   # EU secondary
     username: admin
     password: CHANGE_ME
-  - url: http://TOR02_TS_IP:3000
+  - url: http://TOR01_TS_IP:3000   # NA edge
     username: admin
     password: CHANGE_ME
-  # Add future nodes here as they come online
+  - url: http://TOR02_TS_IP:3000   # NA AGH backend
+    username: admin
+    password: CHANGE_ME
+  - url: http://SHZ01_TS_IP:3000   # APAC edge
+    username: admin
+    password: CHANGE_ME
+  # Add future nodes here (HOU-01, etc.) as they come online
 
 cron: "*/5 * * * *"
 runOnStart: true
