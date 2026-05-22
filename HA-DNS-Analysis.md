@@ -4,7 +4,9 @@
 
 The current setup lists 6 Pi-hole instances directly as Tailscale global nameservers. This is not HA — Tailscale does not guarantee resolver order, and iOS in particular loses DNS entirely when the first-listed resolver goes offline rather than falling through to the others. The Mac working while iOS fails is not evidence of resilience; macOS handles resolver failures more gracefully and may be serving cached results.
 
-**Goals:** DNS survives any individual node failure and any single-region power outage. AdGuard Home filtering remains active on all HA failover paths. Per-LAN Pi-hole filtering and metrics are preserved independently and are not affected by the HA DNS design. The design must be manageable at homelab scale.
+**Goals:** DNS survives any individual node failure and any single-region power outage. AdGuard Home filtering remains active on all HA failover paths — the design fails closed: if all AGH backends are unavailable, DNS breaks rather than silently serving unfiltered responses. Per-LAN Pi-hole filtering and metrics are preserved independently and are not affected by the HA DNS design. The design must be manageable at homelab scale.
+
+**Public cloud DNS edges deliberately excluded.** Running a DNS edge on a cloud VPS (DigitalOcean, Vultr, etc.) would mean DNS queries are processed on third-party infrastructure. All edge nodes are homelab-owned machines.
 
 **Hard constraints from the Tailscale model:**
 - Tailscale IPs are node-bound — they cannot float between machines the way a VRRP VIP can on a LAN. The VIP approach described below works around this.
@@ -52,6 +54,30 @@ Tailscale DNS → 10.253.53.53 (single entry, Override DNS enabled)
 
 This address range avoids conflicts with common home ranges (`192.168.x.x`), common lab/cloud ranges (`10.0–10.10.x.x`), and Tailscale's own CGNAT block (`100.64.0.0/10`). The whole `/24` is reserved so future tailnet service VIPs can draw from it without collision risk.
 
+**Tailscale tag and route auto-approval** — each DNS edge node is tagged `tag:dns-edge`. The ACL policy grants this tag permission to advertise `10.253.53.53/32` and marks it for automatic approval. This is required because the watchdog will withdraw and re-advertise the route on service failures — manual approval in the admin console on every cycle would make the watchdog useless in practice.
+
+```json
+// policy.hujson (add to your Tailscale ACL)
+{
+  "tagOwners": {
+    "tag:dns-edge": ["autogroup:admin"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "10.253.53.53/32": ["tag:dns-edge"]
+    }
+  }
+}
+```
+
+Apply the tag to each edge node before advertising the route:
+```bash
+# In Tailscale admin console → Machines → <node> → Edit tags → add tag:dns-edge
+# OR via tailscale up on the node (if using auth keys with pre-assigned tags)
+sudo tailscale set --advertise-routes=10.253.53.53/32
+# Route will be auto-approved because the node carries tag:dns-edge
+```
+
 ---
 
 ### Inventory Role Mapping
@@ -76,22 +102,24 @@ This address range avoids conflicts with common home ranges (`192.168.x.x`), com
 Each DNS edge node runs the following in parallel with its existing Pi-hole:
 
 ```
-Pi-hole          — binds on eth0:53 (and optionally tailscale0:53); per-LAN filtering + metrics
-AdGuard Home     — binds on 0.0.0.0:5353 (non-standard port); dnsdist backend; filtering
+Pi-hole          — binds on eth0:53 only (BIND mode, not wildcard); per-LAN filtering + metrics
+AdGuard Home     — binds on 127.0.0.1:5353 + Tailscale IP:5353; dnsdist backend; not exposed to LAN
 Unbound          — binds on 127.0.0.1:5335; recursive resolver + DNSSEC; used by both Pi-hole and AGH
 dnsdist          — binds on 10.253.53.53:53 (loopback alias); routes to AGH pool
-Watchdog         — withdraws 10.253.53.53/32 if dnsdist becomes unhealthy
-Tailscale        — --accept-dns=false
+Watchdog         — withdraws 10.253.53.53/32 if dnsdist or AGH filtering becomes unhealthy
+Tailscale        — --accept-dns=false; tagged tag:dns-edge for auto-approved route advertisement
 ```
 
 **Port layout — no conflicts:**
 
 | Process | Interface | Port | Purpose |
 |---|---|---|---|
-| Pi-hole | eth0 (+ optionally tailscale0) | 53 | LAN DNS, per-LAN metrics |
-| AdGuard Home | all interfaces | 5353 | dnsdist backend |
+| Pi-hole | eth0 only (BIND mode — not wildcard) | 53 | LAN DNS, per-LAN metrics |
+| AdGuard Home | 127.0.0.1 + Tailscale IP | 5353 | dnsdist backend (not exposed to LAN) |
 | Unbound | 127.0.0.1 | 5335 | Recursive resolver (shared by Pi-hole and AGH) |
 | dnsdist | 10.253.53.53 (loopback alias) | 53 | HA DNS entry point |
+
+Pi-hole **must** be set to `BIND` listening mode (`pihole-FTL --config dns.listeningMode BIND`) so it binds only to the LAN interface — not the wildcard. Without this, Pi-hole claims `0.0.0.0:53` and dnsdist cannot bind to `10.253.53.53:53` on the same machine.
 
 Pi-hole's upstream is set to `127.0.0.1#5335` (local Unbound). AGH's upstream is also set to `127.0.0.1#5335`. Both filtering layers share the same recursive resolver without interfering with each other.
 
@@ -115,14 +143,13 @@ adguardhome-sync replicates blocklists, allowlists, rewrites, and client setting
 
 ### dnsdist Backend Pool
 
-dnsdist on each edge node routes to all AGH instances via their non-standard port, with local Unbound as a last-resort fallback (no filtering — raw recursive resolution only).
+dnsdist on each edge node routes to all AGH instances via their non-standard port. There is no unfiltered Unbound fallback — if all AGH backends are down, DNS fails. This is deliberate: silent failover to unfiltered DNS contradicts the stated goal and masks a serious infrastructure problem.
 
 ```
 Pool on dns-ams-01:
-  1. AGH on dns-ams-01  →  127.0.0.1:5353  (local, lowest latency — preferred)
-  2. AGH on dns-tor-01  →  TOR01_TS_IP:5353
-  3. AGH on dns-tor-02  →  TOR02_TS_IP:5353
-  4. Unbound fallback   →  127.0.0.1:5335  (last resort, no filtering)
+  1. AGH on dns-ams-01  →  127.0.0.1:5353  (local, lowest latency — preferred, order=10)
+  2. AGH on dns-tor-01  →  TOR01_TS_IP:5353  (order=20)
+  3. AGH on dns-tor-02  →  TOR02_TS_IP:5353  (order=30)
 ```
 
 Each edge carries the same pool, ordered with its own local AGH first. Adding a new AZ node is a one-line change to each edge's dnsdist.conf followed by a restart.
@@ -155,6 +182,33 @@ The LAN Pi-hole path is completely independent of the central HA DNS and require
 
 **Opt-in LAN device (any device that sets DNS manually to 10.253.53.53):**  
 Only reachable if the device runs Tailscale (since `10.253.53.53` is a tailnet-routed address, not a LAN address). Non-Tailscale LAN devices cannot reach it and continue using Pi-hole.
+
+---
+
+### Metrics Expectations
+
+The two systems have different visibility characteristics — this matters for dashboard interpretation:
+
+| Layer | Per-client visibility | Notes |
+|---|---|---|
+| Pi-hole (LAN) | Excellent — per-device metrics | Clients query Pi-hole directly, so Pi-hole sees the real source IP |
+| AGH (tailnet HA) | Weaker per-client visibility | AGH sees the dnsdist edge node as the querying client, not the original Tailscale device — especially when the backend is remote |
+| dnsdist | Best place for tailnet source IPs | dnsdist receives the original query before forwarding; its logs are the source of truth for per-device tailnet metrics |
+
+**Central AGH query logs are not the source of truth for per-device metrics.** Use dnsdist logs for tailnet client attribution. Use Pi-hole for per-LAN client metrics. Use AGH for service-level filtering metrics (blocked request counts, blocklist hit rates).
+
+---
+
+### Phase 2 (Optional): Per-LAN Pi-hole → HA DNS Upstream
+
+A future extension would point each LAN's Pi-hole upstream at `10.253.53.53` instead of local Unbound. This would preserve per-client metrics in Pi-hole while making the recursive resolution path centrally HA. Not recommended at initial rollout — adds coupling between the two systems and means a HA DNS outage affects LAN clients. Implement only once the HA DNS has proven stable over several weeks.
+
+```
+Phase 2 path (optional, future):
+  LAN client → Pi-hole (eth0:53, per-client metrics preserved)
+             → 10.253.53.53 (HA DNS)
+             → dnsdist → AGH → Unbound
+```
 
 ---
 
@@ -220,6 +274,16 @@ Set hostnames before Tailscale enrolment so MagicDNS names are clean:
 Apply to **dns-ams-01**, **dns-tor-01**, and **dns-tor-02**.
 
 ```bash
+# 0. MANDATORY PRE-STEP: Restrict Pi-hole to LAN interface only
+#    Pi-hole FTL binds 0.0.0.0:53 by default, which will conflict with dnsdist.
+#    This must be set before dnsdist is installed.
+sudo pihole-FTL --config dns.listeningMode BIND
+sudo systemctl restart pihole-FTL
+
+# Verify Pi-hole is no longer on wildcard:
+sudo ss -tulpen | grep ':53 '
+# Expected: Pi-hole bound only to LAN IP (e.g. 192.168.x.x:53), NOT 0.0.0.0:53
+
 # 1. Disable DNS acceptance on Tailscale
 sudo tailscale set --accept-dns=false
 
@@ -235,11 +299,22 @@ sudo systemctl enable --now unbound
 #    Confirm Pi-hole is NOT binding to loopback:
 sudo ss -ulnp | grep :53
 
-# 4. Install AdGuard Home (on port 5353)
+# 4. Install AdGuard Home (on port 5353, restricted interfaces)
 curl -fsSL https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
   | sudo sh -s -- -v
-# After initial setup on :3000, change listening port to 5353 in AGH settings
-# Set AGH upstream DNS to 127.0.0.1:5335 (Unbound)
+# After initial setup on :3000:
+#   - Change DNS listening to 127.0.0.1:5353 AND <tailscale_ip>:5353 in AGH settings
+#     (do NOT use 0.0.0.0:5353 — this exposes AGH DNS on the LAN interface)
+#   - Set AGH upstream DNS to 127.0.0.1:5335 (Unbound)
+
+# Firewall: allow port 5353 only from DNS edge Tailscale IPs; block from LAN clients
+# Replace TS_IPs with actual Tailscale IPs of dns-ams-01, dns-tor-01, dns-tor-02
+sudo ufw allow from <AMS01_TS_IP> to any port 5353 proto udp
+sudo ufw allow from <TOR01_TS_IP> to any port 5353 proto udp
+sudo ufw allow from <TOR02_TS_IP> to any port 5353 proto udp
+sudo ufw allow from 127.0.0.1 to any port 5353 proto udp
+sudo ufw deny to any port 5353 proto udp
+sudo ufw reload
 
 # 5. Install dnsdist
 echo "deb [arch=arm64 signed-by=/usr/share/keyrings/dnsdist.gpg] \
@@ -253,9 +328,12 @@ sudo apt update && sudo apt install -y dnsdist
 sudo ip addr add 10.253.53.53/32 dev lo
 # (Make persistent — see Appendix B for systemd unit)
 
-# 7. Advertise VIP via Tailscale
+# 7. Tag the node and advertise VIP via Tailscale
+# First: assign tag:dns-edge to this node in Tailscale admin console (Machines → Edit tags)
+# Then:
 sudo tailscale set --advertise-routes=10.253.53.53/32
-# Then approve in Tailscale admin console → Machines → Edit route settings
+# Route is auto-approved because tag:dns-edge is in autoApprovers (see Core Mechanism section)
+# No manual approval needed — required for watchdog to function correctly
 
 # 8. Enable services
 sudo systemctl enable --now dns-vip-bind
@@ -307,6 +385,11 @@ server:
 
 Replace placeholder IPs with real values from `tailscale status`.
 
+Notes:
+- `order=` is explicit on every backend so intent is unambiguous regardless of declaration order.
+- No Unbound fallback — design fails closed if all AGH backends are down.
+- Packet cache is disabled initially; AGH and Unbound already cache. Enable only if latency or load later justifies it (note: enabling cache makes AGH query logs incomplete for tailnet clients).
+
 ```lua
 -- Bind to VIP on loopback only
 setLocal("10.253.53.53:53")
@@ -320,10 +403,13 @@ setACL({
 })
 
 -- Backend pool: AdGuard Home instances on port 5353
--- Local AGH (same machine — no Tailscale hop)
+-- order= is explicit; firstAvailable picks the lowest-order healthy backend.
+
+-- Local AGH (same machine — no Tailscale hop, always preferred)
 newServer({
   address     = "127.0.0.1:5353",
-  name        = "agh-ams-01",
+  name        = "agh-local",
+  order       = 10,
   checkName   = "cloudflare.com.",
   checkType   = "A",
   mustResolve = true,
@@ -332,6 +418,7 @@ newServer({
 newServer({
   address     = "TOR01_TS_IP:5353",
   name        = "agh-tor-01",
+  order       = 20,
   checkName   = "cloudflare.com.",
   checkType   = "A",
   mustResolve = true,
@@ -340,28 +427,26 @@ newServer({
 newServer({
   address     = "TOR02_TS_IP:5353",
   name        = "agh-tor-02",
+  order       = 30,
   checkName   = "cloudflare.com.",
   checkType   = "A",
   mustResolve = true,
 })
 
--- Add future AZ nodes here:
--- newServer({ address="HOU01_TS_IP:5353", name="agh-hou-01", checkName="cloudflare.com.", checkType="A", mustResolve=true })
+-- Add future AZ nodes here (increment order by 10 per node):
+-- newServer({ address="HOU01_TS_IP:5353", name="agh-hou-01", order=40, checkName="cloudflare.com.", checkType="A", mustResolve=true })
 
--- Last-resort fallback: local Unbound (no filtering)
-newServer({
-  address     = "127.0.0.1:5335",
-  name        = "unbound-fallback",
-  checkName   = "cloudflare.com.",
-  checkType   = "A",
-  mustResolve = true,
-  order       = 99,
-})
+-- NOTE: No unfiltered Unbound fallback. If all AGH backends are down, DNS fails.
+-- This is intentional — see Goals section.
 
 setServerPolicy(firstAvailable)
 
-pc = newPacketCache(10000, { maxTTL = 300, minTTL = 30 })
-getPool(""):setCache(pc)
+-- Packet cache disabled until design is stable.
+-- AGH and Unbound already cache; adding dnsdist cache here would make AGH
+-- query logs incomplete (dnsdist answers repeats before they reach AGH).
+-- To enable later: uncomment the lines below.
+-- pc = newPacketCache(10000, { maxTTL = 300, minTTL = 30 })
+-- getPool(""):setCache(pc)
 
 webserver("127.0.0.1:8083")
 setWebserverConfig({ password = "changeme", apiKey = "changeme" })
@@ -437,12 +522,17 @@ docker run -d \
 
 Requires 3 consecutive failures before withdrawing the route, and 2 consecutive successes before re-advertising. Preserves any other advertised Tailscale routes when modifying.
 
+The probe checks **both** resolution (a known-good domain must return an IP) and filtering (a known-blocked domain must return NXDOMAIN or `0.0.0.0`). This ensures the watchdog reflects true service health, not just raw DNS connectivity through the unfiltered Unbound layer.
+
+`test.blocked.internal` is a custom rewrite entry in AdGuard Home configured to block (return NXDOMAIN). Use a dedicated test entry rather than relying on a real ad domain like `doubleclick.net`, since block response style for real domains may vary across blocklist updates.
+
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
 VIP="10.253.53.53/32"
 TEST_DOMAIN="cloudflare.com"
+BLOCKED_DOMAIN="test.blocked.internal"   # Custom block entry in AGH — must return NXDOMAIN
 FAIL_THRESHOLD=3
 SUCCESS_THRESHOLD=2
 PROBE_INTERVAL=5
@@ -455,8 +545,15 @@ advertised=true
 log() { logger -t "$LOG_TAG" "$*"; echo "$(date -Is) $*" >&2; }
 
 is_dns_healthy() {
+  # Check 1: known-good domain must resolve to an IP
   dig @10.253.53.53 "$TEST_DOMAIN" +time=2 +tries=1 +short A \
-    | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+
+  # Check 2: known-blocked domain must NOT resolve (filtering is active)
+  local blocked_result
+  blocked_result=$(dig @10.253.53.53 "$BLOCKED_DOMAIN" +time=2 +tries=1 +short A 2>/dev/null)
+  # NXDOMAIN or 0.0.0.0 response = blocked = healthy; any real IP = AGH filtering not working
+  [[ -z "$blocked_result" || "$blocked_result" == "0.0.0.0" ]]
 }
 
 get_other_routes() {
@@ -543,9 +640,9 @@ Tailscale Admin Console → Settings → DNS
 
 Verify from macOS:
 ```bash
-tailscale dns status                       # confirm 10.253.53.53 is the resolver
-dig @10.253.53.53 cloudflare.com           # should resolve
-dig @10.253.53.53 doubleclick.net          # should return NXDOMAIN (blocked by AGH)
+tailscale dns status                            # confirm 10.253.53.53 is the resolver
+dig @10.253.53.53 cloudflare.com               # should resolve
+dig @10.253.53.53 test.blocked.internal        # should return NXDOMAIN (custom AGH block entry)
 ```
 
 Verify each edge node directly:
@@ -553,4 +650,103 @@ Verify each edge node directly:
 dig @DNS_AMS_TS_IP  -p 5353 cloudflare.com   # AGH on dns-ams-01
 dig @DNS_TOR01_TS_IP -p 5353 cloudflare.com  # AGH on dns-tor-01
 dig @DNS_TOR02_TS_IP -p 5353 cloudflare.com  # AGH on dns-tor-02
+```
+
+---
+
+## Appendix E: Rollout Plan
+
+Build and verify incrementally. Do not point Tailscale DNS at the VIP until all failover scenarios have been tested.
+
+```
+1. Build dns-ams-01 only.
+   - Install and verify: Pi-hole (BIND mode), Unbound, AGH (port 5353, restricted interfaces), dnsdist.
+   - Confirm port layout with: sudo ss -tulpen | grep -E ':53|:5353|:5335'
+   - Confirm AGH resolves and blocks: dig @127.0.0.1 -p 5353 cloudflare.com
+                                       dig @127.0.0.1 -p 5353 test.blocked.internal
+   - Confirm dnsdist routes correctly: dig @10.253.53.53 cloudflare.com
+   - Start watchdog; confirm it logs healthy probes.
+
+2. Build dns-tor-01. Add it to dns-ams-01's dnsdist pool; verify cross-site AGH resolution.
+   - Assign tag:dns-edge; advertise 10.253.53.53/32; confirm auto-approval in Tailscale console.
+
+3. Build dns-tor-02. Repeat.
+
+4. Test AGH backend failover.
+   - Stop AGH on dns-ams-01: sudo systemctl stop adguardhome
+   - Confirm dnsdist fails over to dns-tor-01 within ~1s (health check interval).
+   - Restart AGH; confirm it comes back into rotation.
+
+5. Test dnsdist crash → watchdog → route withdrawal.
+   - Stop dnsdist: sudo systemctl stop dnsdist
+   - Wait 15–20s; confirm watchdog withdraws 10.253.53.53/32 (check tailscale status).
+   - Restart dnsdist; confirm watchdog re-advertises after 2 successful probes.
+
+6. Test node-level failover.
+   - Power off or stop Tailscale on dns-ams-01: sudo tailscale down
+   - Confirm Tailscale routes to dns-tor-01 within ~15s.
+   - Confirm DNS still resolves from a tailnet client during the failover window.
+
+7. Only after steps 1–6 pass: replace Tailscale nameservers with 10.253.53.53.
+   - In Tailscale Admin Console → Settings → DNS, replace all Pi-hole entries with 10.253.53.53.
+
+8. Test iOS last (most sensitive to DNS failure).
+   - Disconnect and reconnect Tailscale on iOS.
+   - Confirm DNS resolves and ad blocking is active.
+   - Simulate an edge node failure; confirm iOS continues resolving within ~30s.
+```
+
+---
+
+## Appendix F: Break-Glass and Monitoring
+
+### Break-Glass Procedures
+
+If the HA DNS breaks and clients lose DNS:
+
+```bash
+# Option 1: Disable Tailscale DNS on the affected client temporarily
+# macOS: System Settings → Network → DNS → remove 10.253.53.53 override
+# Or: tailscale set --accept-dns=false  (on the affected machine)
+
+# Option 2: Restore old Pi-hole nameservers in Tailscale Admin Console
+# Settings → DNS → replace 10.253.53.53 with the direct Pi-hole Tailscale IPs
+
+# Option 3: SSH to a DNS edge node and force-reset
+ssh dns-ams-01
+sudo tailscale set --advertise-routes=   # withdraw VIP
+sudo systemctl restart dnsdist
+sudo tailscale set --advertise-routes=10.253.53.53/32  # re-advertise
+```
+
+### Monitoring Checklist
+
+Run these periodically or wire into a monitoring tool (e.g. Uptime Kuma, Prometheus blackbox exporter):
+
+```bash
+# Resolution health (should return an IP)
+dig @10.253.53.53 cloudflare.com +short
+
+# Filtering health (should return NXDOMAIN or empty)
+dig @10.253.53.53 test.blocked.internal +short
+
+# dnsdist backend health (via dnsdist web API — adjust password)
+curl -s -H 'X-API-Key: changeme' http://127.0.0.1:8083/api/v1/servers/localhost/pool \
+  | python3 -m json.tool
+
+# AGH sync status (from Mac Studio — check last sync time)
+docker logs adguardhome-sync --tail 20
+
+# Unbound recursion
+dig @127.0.0.1 -p 5335 cloudflare.com +short
+
+# Watchdog route state
+tailscale status --json | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); \
+   print([r for r in d.get('Self',{}).get('AllowedIPs',[]) if '10.253.53' in r])"
+
+# Tailscale node online state (run from another tailnet node)
+tailscale ping dns-ams-01
+tailscale ping dns-tor-01
+tailscale ping dns-tor-02
 ```
