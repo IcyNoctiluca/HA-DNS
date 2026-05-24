@@ -1,11 +1,17 @@
 # HA DNS for Homelab Tailnet
 
-> **v2 — May 2026.** Changes from v1:
-> - Appendix C (bash watchdog) replaced with reference to the new `dns-ha-agent` service. See `dns-ha-agent-blueprint.md`.
-> - dnsdist webserver section hardened (was using default credentials).
-> - Unbound recursive-resolution verification added to Appendix A.
-> - Failure Matrix, Rollout Plan, and Monitoring updated to reflect the containerised agent.
-> - Appendix G added: Technitium evaluation plan for HOU-01.
+> **v3 — May 2026.** Changes from v2 (incorporating external review feedback):
+> - Appendix A rollout reordered: dnsdist starts before dns-ha-agent.
+> - Pi-hole port-layout expectation in Appendix A corrected (BIND mode = LAN_IP only).
+> - AGH firewall rules now allow both UDP and TCP on :5353; AGH admin port :3000 explicitly restricted.
+> - Failure Matrix HEALTHCHECK behaviour corrected (Docker does not auto-restart on unhealthy alone).
+> - Regional-failover language softened to reflect free-tier Tailscale behaviour.
+> - Auto-approval timing caveat added to rollout.
+> - DNSSEC + EDNS0 large-response test added to rollout step 1.
+> - "Oldest-enrolled edge wins" empirical verification added to rollout.
+> - Agent image versioning changed from rolling `:latest` to digest-pinned (see `dns-ha-agent-blueprint.md`).
+>
+> v2 changes (preserved): bash watchdog replaced by `dns-ha-agent`; dnsdist webserver hardened; Unbound recursive verification added; Technitium evaluation appendix added.
 
 ## Context & Goals
 
@@ -77,19 +83,30 @@ This address range avoids conflicts with common home ranges (`192.168.x.x`), com
 }
 ```
 
-The same ACL also restricts the agent's peer-health endpoint (TCP 8091) so only other `tag:dns-edge` nodes can reach it:
+The same ACL also restricts both the agent's peer-health endpoint (TCP 8091) and AGH's admin/API port (TCP 3000). Peer health is restricted to other `tag:dns-edge` nodes; AGH admin is restricted to the Mac Studio (running adguardhome-sync) and to explicit admin devices.
 
 ```json
 {
+  "tagOwners": {
+    "tag:dns-edge":    ["autogroup:admin"],
+    "tag:agh-admin":   ["autogroup:admin"]
+  },
   "acls": [
     {
       "action": "accept",
       "src":    ["tag:dns-edge"],
       "dst":    ["tag:dns-edge:8091"]
+    },
+    {
+      "action": "accept",
+      "src":    ["tag:agh-admin"],
+      "dst":    ["tag:dns-edge:3000"]
     }
   ]
 }
 ```
+
+Apply `tag:agh-admin` to the Mac Studio (sync daemon) and any admin laptops/devices. All other tailnet clients are denied by default (Tailscale ACLs are deny-by-default once any policy is defined). Note: Tailscale ACLs do not affect LAN traffic — host firewall rules below also restrict :3000 from the local LAN.
 
 Apply the tag to each edge node before advertising the route:
 ```bash
@@ -166,7 +183,9 @@ APAC region  — 1 edge, 1 AGH backend
 
 No cross-region fallback is configured. If an entire regional AGH pool is unavailable, DNS fails for clients routed to that region's edge — which is the correct fail-closed behaviour. Tailscale will route those clients to the next available edge (most likely EU) within ~15s, where EU AGH will serve them correctly.
 
-A note on Tailscale routing: on the free tier, there is no geographic client-to-edge affinity guarantee. The oldest-enrolled edge node is Tailscale's primary for all clients. In practice, when a primary edge is unreachable, Tailscale converges to the nearest available edge, so regional routing is approximate rather than strict. Regional routing preference is an Enterprise feature.
+A note on Tailscale routing: on the free tier, there is no geographic client-to-edge affinity guarantee. Tailscale's HA subnet-router behaviour selects one active node per subnet; when that node is unreachable, Tailscale converges to *an* available edge — but on the free tier, the destination should be treated as implementation-selected, not necessarily geographically nearest. Regional routing preference is an Enterprise feature.
+
+This matters because the regional AGH pool model assumes a client routed to NA gets NA AGH. In reality, the active subnet router may be one edge for all clients regardless of their location. That is not necessarily a problem (filtering is identical across regions thanks to adguardhome-sync, only latency differs), but "regional pools" are edge-local pools, not guaranteed client-local pools.
 
 ---
 
@@ -278,8 +297,8 @@ Phase 2 path (optional, future):
 | One regional AGH backend goes down | dnsdist health check (~1s) | Routes to next healthy backend in the same region. No client impact. |
 | All AGH backends in a region go down | dns-ha-agent probe failure (~4s) | Agent withdraws 10.253.53.53/32 on that node. Tailscale routes clients to next available edge (~15s), which serves from its own regional pool. Filtering remains active. |
 | dnsdist crashes on an edge node | dns-ha-agent probe failure (~4s) | Agent withdraws the route. Tailscale fails over to next edge (~15s). ~19s max disruption. |
-| dns-ha-agent crashes | Docker restart policy (immediate) | Container restarts. Brief window (~6s) before STARTING → HEALTHY re-advertises. If the underlying node is also broken, Tailscale node-level failover handles it. |
-| dns-ha-agent hangs | Docker HEALTHCHECK fails (30s) | Docker restarts the container. Same recovery as crash case. |
+| dns-ha-agent crashes (non-zero exit) | Docker `restart: unless-stopped` (immediate) | Container restarts. Brief window (~6s) before STARTING → HEALTHY re-advertises. If the underlying node is also broken, Tailscale node-level failover handles it. |
+| dns-ha-agent hangs | Internal liveness check → self-exit (~15s) | Agent's internal watchdog detects deadlock/hang and forces non-zero exit. Docker `restart: unless-stopped` then restarts the container. Same recovery path as crash case. Note: Docker `HEALTHCHECK` alone does NOT auto-restart in Compose; the recovery mechanism is the self-exit + restart policy. |
 | dns-ha-agent on a node loses peer reachability | Peer monitor (60s threshold) | Partition detection: if 2+ peers report this node unreachable, agent self-withdraws. Prevents split-brain advertising. |
 | dns-ams-01 goes down (AMS tinkering, power, hardware) | Tailscale node disconnects (~15s) | Tailscale fails over to dns-iom-01. EU DNS continues uninterrupted from IOM's pool. AMS LAN Pi-hole also down — AMS LAN clients lose DNS until node recovers. |
 | dns-iom-01 goes down | Tailscale node disconnects (~15s) | EU DNS continues on dns-ams-01. No tailnet impact. |
@@ -397,15 +416,27 @@ curl -fsSL https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scri
 #     (do NOT use 0.0.0.0:5353 — this exposes AGH DNS on the LAN interface)
 #   - Set AGH upstream DNS to 127.0.0.1:5335 (Unbound)
 
-# Firewall: allow port 5353 only from DNS edge Tailscale IPs; block from LAN clients
-# Replace TS_IPs with actual Tailscale IPs of every edge node
-sudo ufw allow from <AMS01_TS_IP> to any port 5353 proto udp
-sudo ufw allow from <IOM01_TS_IP> to any port 5353 proto udp
-sudo ufw allow from <TOR01_TS_IP> to any port 5353 proto udp
-sudo ufw allow from <TOR02_TS_IP> to any port 5353 proto udp
-sudo ufw allow from <SHZ01_TS_IP> to any port 5353 proto udp
+# Firewall: allow port 5353 (BOTH UDP and TCP) only from DNS edge Tailscale IPs;
+# block from LAN clients. TCP is required for DNSSEC large responses and
+# UDP-truncation fallback — UDP-only is a real bug.
+# Replace TS_IPs with actual Tailscale IPs of every edge node.
+for EDGE in <AMS01_TS_IP> <IOM01_TS_IP> <TOR01_TS_IP> <TOR02_TS_IP> <SHZ01_TS_IP>; do
+  sudo ufw allow from $EDGE to any port 5353 proto udp
+  sudo ufw allow from $EDGE to any port 5353 proto tcp
+done
 sudo ufw allow from 127.0.0.1 to any port 5353 proto udp
+sudo ufw allow from 127.0.0.1 to any port 5353 proto tcp
 sudo ufw deny to any port 5353 proto udp
+sudo ufw deny to any port 5353 proto tcp
+
+# Firewall: AGH admin/API port 3000.
+# Used by adguardhome-sync from the Mac Studio. Must NOT be open to LAN or
+# ordinary tailnet clients. Tailscale ACL (above) handles tailnet restriction;
+# this UFW rule handles LAN/host-level restriction.
+sudo ufw allow from <MAC_STUDIO_TS_IP> to any port 3000 proto tcp
+sudo ufw allow from <ADMIN_LAPTOP_TS_IP> to any port 3000 proto tcp
+sudo ufw allow from 127.0.0.1 to any port 3000 proto tcp
+sudo ufw deny to any port 3000 proto tcp
 sudo ufw reload
 
 # 5. Install dnsdist
@@ -419,11 +450,23 @@ sudo apt update && sudo apt install -y dnsdist
 # 6. Bind VIP to loopback (via systemd unit — see Appendix B)
 sudo systemctl enable --now dns-vip-bind
 
-# 7. Tag the node in Tailscale admin (do NOT manually advertise the route here —
+# 7. Start dnsdist BEFORE deploying the agent.
+#    The agent probes the local DNS stack and only advertises the VIP when
+#    healthy. Starting it before dnsdist would put the agent into STARTING
+#    with failing probes by design — noisy and easy to misread during rollout.
+sudo systemctl enable --now dnsdist
+
+# 7a. Verify dnsdist locally before involving Tailscale or the agent.
+dig @10.253.53.53 cloudflare.com +short
+# Expected: a real A record (e.g. 1.1.1.1 / 1.0.0.1).
+dig @10.253.53.53 test.blocked.internal +short
+# Expected: empty (filtered) — confirms AGH is in the path and applying rules.
+
+# 8. Tag the node in Tailscale admin (do NOT manually advertise the route here —
 #    dns-ha-agent will do it once the stack is healthy).
 #    In Tailscale admin console → Machines → <node> → Edit tags → add tag:dns-edge
 
-# 8. Deploy dns-ha-agent via ansible
+# 9. Deploy dns-ha-agent via ansible.
 #    The agent handles VIP route advertisement based on health probes.
 #    Configuration is rendered from inventory/host_vars by the ansible role.
 ansible-playbook -l <this-node> playbooks/dns-ha-agent.yml
@@ -431,20 +474,17 @@ ansible-playbook -l <this-node> playbooks/dns-ha-agent.yml
 # then calls `tailscale set --advertise-routes=10.253.53.53/32`.
 # Route auto-approves via tag:dns-edge.
 
-# 9. Enable dnsdist service
-sudo systemctl enable --now dnsdist
-
 # 10. Verify port layout
-sudo ss -ulnp | grep :53
-# Expected:
-#   Pi-hole   → eth0_IP:53, tailscale0_IP:53
-#   dnsdist   → 10.253.53.53:53
-# Expected on :5353:
-#   AGH       → 127.0.0.1:5353, tailscale0_IP:5353
-# Expected on :5335:
-#   Unbound   → 127.0.0.1:5335
-# Expected on :8091 (TCP):
-#   dns-ha-agent (container) → tailscale0_IP:8091
+sudo ss -tulpen | grep -E ':53|:5353|:5335|:8091|:3000'
+# Expected (Pi-hole in BIND mode — LAN IP ONLY, NOT eth0 + tailscale0):
+#   Pi-hole   → LAN_IP:53 (udp+tcp)
+#   dnsdist   → 10.253.53.53:53 (udp+tcp)
+#   AGH       → 127.0.0.1:5353, tailscale0_IP:5353 (udp+tcp)
+#   AGH admin → 127.0.0.1:3000, tailscale0_IP:3000 (tcp)
+#   Unbound   → 127.0.0.1:5335 (udp+tcp)
+#   dns-ha-agent (container) → tailscale0_IP:8091 (tcp)
+# If Pi-hole shows on eth0_IP:53 AND tailscale0_IP:53, BIND mode is not active
+# correctly — re-run step 0.
 ```
 
 ---
@@ -632,12 +672,13 @@ The v1 design used a bash watchdog script for health-driven route mutation. This
 
 **Deployment summary** (the operational hook for this document):
 
-1. The agent is built by Forgejo Actions and published to the Forgejo container registry at `forgejo.homelab.internal/homelab/dns-ha-agent:latest`.
-2. An ansible role (`ansible/roles/dns-ha-agent`) renders a per-node config from `host_vars` and starts the container via docker-compose with `--network host`.
+1. The agent is built by Forgejo Actions and published to the Forgejo container registry at `forgejo.homelab.internal/homelab/dns-ha-agent`. CI publishes `:latest` as a browse-only pointer; **deployments pin by image digest** (`@sha256:...`).
+2. An ansible role (`ansible/roles/dns-ha-agent`) renders a per-node config from `host_vars` and starts the container via docker-compose with `--network host`. The role asserts a digest is set; deploys without one are a hard error.
 3. Per-node config sets the node's name, region, VIP, peer list (other edges' Tailscale IPs), and probe parameters. Single-node regions (currently SHZ-01) deploy with an empty peer list, which automatically disables partition detection.
 4. The agent exposes `/health` (JSON, peer-facing) and `/metrics` (Prometheus) on TCP 8091. The Tailscale ACL restricts inbound to `tag:dns-edge`.
-5. On startup, the agent waits for 3 consecutive successful local probes before calling `tailscale set --advertise-routes=10.253.53.53/32`. On SIGTERM, it withdraws the route gracefully before exit.
-6. Rolling `:latest` is used for versioning. Rollback requires reverting the source commit and re-deploying.
+5. On startup, the agent reconciles actual Tailscale route state — explicitly withdrawing the VIP if a previous instance crashed without graceful shutdown — then waits for 3 consecutive successful local probes before re-advertising. On SIGTERM, it withdraws the route gracefully before exit.
+6. The agent has an internal `WatchdogThread` that forces `System.exit(70)` on probe-loop deadlock. Docker `restart: unless-stopped` then restarts the container. This is the recovery path — `HEALTHCHECK` alone does NOT auto-restart in Compose.
+7. Rollback is byte-identical: change `dns_ha_agent_image_digest` in ansible back to a previous known-good digest, re-run the playbook. The previous artifact remains in the registry (retention: last 20 digests).
 
 **Why this replaces the bash watchdog**: the v1 bash script had three failure modes that became uncomfortable to ignore — no liveness check on the script itself (silent hangs left stale advertisements), state-tracking via parsing `tailscale status` instead of explicit intent, and destructive `--advertise-routes=` mutations that wiped externally-added routes. A single-purpose containerised service with structured config, proper observability, and Docker-managed liveness eliminates all three while also unlocking cross-node observability (peer-health probing) that wasn't feasible in bash.
 
@@ -685,11 +726,24 @@ Build and verify incrementally. Do not point Tailscale DNS at the VIP until all 
 1. Build dns-ams-01 only.
    - Install and verify: Pi-hole (BIND mode), Unbound (with +trace verification),
      AGH (port 5353, restricted interfaces), dnsdist.
-   - Confirm port layout with: sudo ss -tulpen | grep -E ':53|:5353|:5335'
+   - Confirm port layout with: sudo ss -tulpen | grep -E ':53|:5353|:5335|:8091|:3000'
    - Confirm AGH resolves and blocks: dig @127.0.0.1 -p 5353 cloudflare.com
                                        dig @127.0.0.1 -p 5353 test.blocked.internal
    - Confirm dnsdist routes correctly: dig @10.253.53.53 cloudflare.com
+   - VERIFY DNSSEC + EDNS0 large-response handling through the full path.
+     Large signed responses can be silently truncated by UDP-only paths with
+     small buffers. Both of the following must return a real answer:
+       dig +dnssec +bufsize=1232 @10.253.53.53 cloudflare.com
+       dig +dnssec +bufsize=1232 +tcp @10.253.53.53 cloudflare.com
+     If the UDP version returns no answer / truncated, check dnsdist + AGH
+     EDNS0 buffer settings and host MTU.
    - Deploy dns-ha-agent via ansible (single-node config: empty peer list initially).
+   - IMPORTANT: if 10.253.53.53/32 was ever manually advertised on this node
+     before autoApprovers was added to the Tailscale ACL, the route stays
+     pending and the agent's re-advertisement does not auto-approve. Fix:
+        sudo tailscale set --advertise-routes=   # withdraw
+        # restart the agent so it re-advertises; route auto-approves this time
+        docker restart dns-ha-agent
    - Confirm agent /health returns HEALTHY and route is advertised:
        curl http://AMS_TS_IP:8091/health | jq '.state, .vip_advertised'
        tailscale status   # should show 10.253.53.53/32 advertised + approved
@@ -705,6 +759,21 @@ Build and verify incrementally. Do not point Tailscale DNS at the VIP until all 
 
 5. Build dns-shz-01. Deploy dns-ha-agent with empty peer list
    (single-node region, no partition detection).
+
+5a. EMPIRICALLY VERIFY Tailscale's primary-selection behaviour.
+   The HA design assumes "oldest-enrolled edge is primary"; Tailscale's
+   free-tier algorithm is not formally documented. Confirm what your tailnet
+   actually does before relying on it:
+   - From a tailnet client, query the VIP: dig @10.253.53.53 cloudflare.com
+   - On each edge, check which one received the query (dnsdist logs, or
+     temporarily increase log verbosity).
+   - Make a note of which edge is currently primary (this is now the baseline).
+   - Optional: re-enrol a non-primary edge (force a newer enrollment date).
+     Observe whether the primary selection changes. If it does, the "oldest
+     enrolled" claim holds. If it doesn't, document the actual behaviour and
+     adjust expectations in the Failure Matrix.
+   This is a one-off verification — re-do only if Tailscale changes the
+   selection algorithm.
 
 6. Test AGH backend failover.
    - Stop AGH on dns-ams-01: sudo systemctl stop adguardhome
