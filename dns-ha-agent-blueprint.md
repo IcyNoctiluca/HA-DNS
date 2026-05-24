@@ -1,6 +1,11 @@
 # dns-ha-agent — Service Blueprint
 
-> Companion document to `HA-DNS-Analysis.md`. Specifies the self-contained, containerised, peer-aware health agent that manages each DNS edge node's Tailscale VIP advertisement.
+> **v2 — May 2026.** Companion document to `HA-DNS-Analysis.md`. Specifies the self-contained, containerised, peer-aware health agent that manages each DNS edge node's Tailscale VIP advertisement.
+>
+> Changes from v1 (incorporating external review feedback):
+> - **Startup reconciliation** (§8): agent now explicitly reconciles actual Tailscale route state at boot, withdrawing stale advertisements from crashed predecessors before re-validating via probes.
+> - **Hang detection via self-exit** (§8): explicit `WatchdogThread` forces `System.exit(70)` on internal deadlock, since Docker `HEALTHCHECK` does NOT auto-restart unhealthy containers in plain Compose. `HEALTHCHECK` remains for diagnostic visibility only.
+> - **Image versioning changed from rolling `:latest` to digest pinning**: CI publishes `:latest` as a convenience pointer, but ansible deploys pin by `@sha256:...` digest, asserted non-empty by the role. Rollback is byte-identical, not "revert source and rebuild."
 
 ---
 
@@ -374,10 +379,13 @@ The FSM transitions are evaluated on every probe cycle. The `Decider` is statele
 1. Parse `/etc/dns-ha-agent/config.yaml`. Exit code 78 if invalid.
 2. Validate config (peer URLs reachable in DNS sense, VIP format, etc.). Log warnings but don't exit on peer-unreachable.
 3. Start HTTP server (Jersey) on configured bind address.
-4. Start probe loop (one virtual thread).
-5. Start peer monitor loops (one virtual thread per peer).
-6. Begin in STARTING state. Route is NOT advertised.
-7. After `success_threshold` consecutive successful probes, transition to HEALTHY and call `TailscaleClient.advertise()`.
+4. **Reconcile actual route state with desired state.** Call `TailscaleClient.currentlyAdvertised()` to see what Tailscale currently advertises. If the VIP `10.253.53.53/32` is already advertised (likely because a previous instance crashed without graceful shutdown), explicitly withdraw it now. The agent always re-derives the route advertisement from its own observed health; a stale advertisement from a dead predecessor must not be inherited as "we're healthy." Log this loudly: `WARN: found stale VIP advertisement at startup, withdrawing pending health verification`.
+5. Start probe loop (one virtual thread).
+6. Start peer monitor loops (one virtual thread per peer).
+7. Begin in STARTING state. Route is NOT advertised.
+8. After `success_threshold` consecutive successful probes, transition to HEALTHY and call `TailscaleClient.advertise()`. Reconciliation guarantees this is the *only* path by which the route becomes advertised — there is no "we were already advertised, just keep going" shortcut.
+
+This reconciliation step is the answer to the question "what if the agent crashes mid-flight and a new instance starts up while the route is still advertised?" Without it, the new instance would inherit the stale advertisement even if its local stack is actually unhealthy. With it, the new instance always re-validates from scratch before advertising.
 
 ### Graceful shutdown (SIGTERM)
 
@@ -388,7 +396,19 @@ The FSM transitions are evaluated on every probe cycle. The `Decider` is statele
 5. Flush logs.
 6. Exit code 0.
 
-If SIGKILL is received (or process crashes), the route advertisement remains. systemd `Restart=always` on the container restarts it; the new instance starts in STARTING state and re-advertises after the success threshold. There is a brief window (typically 6–10s) where the route is advertised by a dead agent. This is acceptable because Tailscale's own node-level failover would catch the dead container's node going offline anyway.
+If SIGKILL is received (or process crashes), the route advertisement remains. Docker `restart: unless-stopped` restarts the container; the new instance performs the startup reconciliation (§Startup step 4) — explicitly withdrawing the stale advertisement before re-validating via probes. There is a brief window (typically 6–10s) between the crash and the new instance re-advertising. This is acceptable because Tailscale's own node-level failover would catch the dead container's node going offline anyway.
+
+### Hang detection and self-exit
+
+**Important**: Docker `HEALTHCHECK` marks a container `unhealthy` but does NOT auto-restart it in plain Compose. Relying on Docker health status alone is a footgun. The agent must therefore detect internal hangs and *exit non-zero* itself, letting Docker's `restart: unless-stopped` policy do the restart.
+
+Implementation:
+
+- A dedicated `WatchdogThread` (separate from the probe loop) wakes every 10s and verifies that the probe loop has reported a result (success or failure) within the last 30s. If not, the probe loop has hung — the watchdog logs `FATAL: probe loop hung, forcing exit` and calls `System.exit(70)` (EX_SOFTWARE).
+- The HTTP server is also monitored: if it fails to respond to its own loopback `/health` GET within 5s, same self-exit path.
+- Uncaught exceptions in any virtual thread are routed to `Thread.setDefaultUncaughtExceptionHandler` which logs and exits.
+
+The Docker `HEALTHCHECK` directive remains in the Dockerfile but its role is **diagnostic only** (visible in `docker ps` for operator visibility, scraped by monitoring) — recovery comes from the agent self-exiting + Docker restart policy, not from the healthcheck triggering a restart.
 
 ### Error handling
 
@@ -700,8 +720,10 @@ WORKDIR /app
 COPY --from=build /build/build/libs/dns-ha-agent.jar /app/dns-ha-agent.jar
 COPY config/example.yaml /etc/dns-ha-agent/example.yaml
 
-# Container healthcheck — separate from /health endpoint logic.
-# Just confirms the JVM is up and HTTP server responds.
+# Container HEALTHCHECK is DIAGNOSTIC ONLY — visible in `docker ps`, scraped by
+# monitoring. It does NOT trigger restarts (Docker/Compose does not auto-restart
+# on unhealthy alone). Recovery from hangs comes from the agent self-exiting
+# via its internal WatchdogThread, plus `restart: unless-stopped`.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8091/health || exit 1
 
@@ -718,7 +740,11 @@ Two architectures need to be built: `amd64` (if any edge is x86) and `arm64` (Pi
 ```yaml
 services:
   dns-ha-agent:
-    image: forgejo.homelab.internal/homelab/dns-ha-agent:latest
+    # IMMUTABLE DIGEST PIN — never use :latest in production deploys.
+    # Digest is rendered into this file by the ansible role from
+    # dns_ha_agent_image_digest, which is bumped on each intentional deploy.
+    # Rollback = change the digest var back to a known-good value, redeploy.
+    image: forgejo.homelab.internal/homelab/dns-ha-agent@sha256:DIGEST_HERE
     container_name: dns-ha-agent
     restart: unless-stopped
     network_mode: host
@@ -774,6 +800,8 @@ jobs:
     needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: docker
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
@@ -785,32 +813,48 @@ jobs:
           username: ${{ secrets.FORGEJO_REGISTRY_USER }}
           password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
       - name: Build and push multi-arch
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # :latest published as a convenience pointer ONLY.
+          # Ansible deploys pin by digest, not by :latest.
           tags: |
             forgejo.homelab.internal/homelab/dns-ha-agent:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Publish digest as build artifact
+        run: |
+          echo "Built digest: ${{ steps.push.outputs.digest }}"
+          echo "${{ steps.push.outputs.digest }}" > digest.txt
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: image-digest
+          path: digest.txt
 
   smoke-test:
     needs: build-and-push
     runs-on: docker
     steps:
-      - name: Pull and smoke-test
+      - name: Pull and smoke-test (by digest)
         run: |
-          docker pull forgejo.homelab.internal/homelab/dns-ha-agent:latest
+          DIGEST="${{ needs.build-and-push.outputs.digest }}"
+          IMAGE="forgejo.homelab.internal/homelab/dns-ha-agent@${DIGEST}"
+          docker pull "${IMAGE}"
           docker run -d --name smoke --rm \
             -v ./test-config.yaml:/etc/dns-ha-agent/config.yaml \
-            forgejo.homelab.internal/homelab/dns-ha-agent:latest
+            "${IMAGE}"
           sleep 30
           curl -fsS http://localhost:8091/health
           docker stop smoke
 ```
 
-**Versioning**: rolling `:latest` only. Each main-branch commit publishes a new `:latest`. No git-sha tags. Rollback = revert commit, rebuild, redeploy (slow but unambiguous).
+**Versioning**: every main-branch commit publishes a new image to the Forgejo registry. The `:latest` tag is published as a convenience pointer for humans browsing the registry, but **deployments pin by digest** (`sha256:...`) via the ansible variable `dns_ha_agent_image_digest`. CI exposes the digest as a job output and as a build artifact, so the new digest can be read from CI after a successful build.
+
+**Rollback**: change `dns_ha_agent_image_digest` in ansible to a previous known-good digest, re-run the playbook. The previous artifact is still in the registry (Forgejo retention keeps the last N digests); rollback is byte-identical to the prior production state, not "revert source and hope the rebuild produces the same artifact."
 
 **Secrets** (configured in Forgejo repo settings):
 - `FORGEJO_REGISTRY_USER`
@@ -822,8 +866,9 @@ jobs:
 
 - **Registry**: Forgejo's built-in container registry at `forgejo.homelab.internal/homelab/dns-ha-agent`.
 - **Visibility**: private to the `homelab` org.
-- **Auth**: Forgejo personal access token with `write:packages` scope, stored as a CI secret. Ansible pulls anonymously if the image is public to the homelab tailnet, or with a deploy token if not.
-- **Retention**: keep last 10 `:latest` revisions (Forgejo retention policy). Older images garbage-collected.
+- **Auth**: Forgejo personal access token with `write:packages` scope, stored as a CI secret. Ansible pulls with a read-only deploy token (separate token, `read:packages` scope only).
+- **Tags published**: `:latest` (rolling pointer for browse-only). Deployments pin by `@sha256:DIGEST`.
+- **Retention**: keep last 20 image digests (Forgejo retention policy). This is the rollback window — going further back than 20 deploys requires re-building from source. Adjust if your deploy cadence is high.
 
 ---
 
@@ -845,7 +890,13 @@ ansible/roles/dns-ha-agent/
 ### `defaults/main.yml`
 
 ```yaml
-dns_ha_agent_image: forgejo.homelab.internal/homelab/dns-ha-agent:latest
+dns_ha_agent_image_repo: forgejo.homelab.internal/homelab/dns-ha-agent
+
+# MANDATORY: must be set in group_vars (or per-node host_vars).
+# This is the immutable artifact pin. Bump on intentional deploys; revert
+# for rollback. Read from CI build output after a successful main-branch build.
+dns_ha_agent_image_digest: ""       # e.g. "sha256:abc123..."
+
 dns_ha_agent_config_dir: /etc/dns-ha-agent
 dns_ha_agent_state_dir: /var/lib/dns-ha-agent
 dns_ha_agent_compose_dir: /etc/dns-ha-agent
@@ -858,9 +909,36 @@ dns_ha_agent_peers: []              # MUST set in host_vars
 dns_ha_agent_http_port: 8091
 ```
 
-### `tasks/main.yml` (skeleton)
+### `tasks/main.yml` (skeleton — note digest pinning)
+
+The image reference in the docker-compose template is `{{ dns_ha_agent_image_repo }}@{{ dns_ha_agent_image_digest }}`. The role asserts that `dns_ha_agent_image_digest` is non-empty before doing anything, so accidentally running the playbook without a digest set is a hard error, not a "pulls :latest by surprise" silent regression.
 
 ```yaml
+- name: Assert digest is pinned
+  assert:
+    that:
+      - dns_ha_agent_image_digest is defined
+      - dns_ha_agent_image_digest | length > 0
+      - dns_ha_agent_image_digest is match("^sha256:[a-f0-9]{64}$")
+    fail_msg: >
+      dns_ha_agent_image_digest must be set to a sha256:... digest.
+      Read it from the CI build output and set in group_vars.
+
+# ... (rest of tasks as before — directory creation, template render, pull, compose up)
+```
+
+### `tasks/main.yml` (full)
+
+```yaml
+- name: Assert image digest is pinned (no rolling :latest in production)
+  assert:
+    that:
+      - dns_ha_agent_image_digest is defined
+      - dns_ha_agent_image_digest | length > 0
+      - dns_ha_agent_image_digest is match("^sha256:[a-f0-9]{64}$")
+    fail_msg: >
+      dns_ha_agent_image_digest must be set to a sha256:... digest.
+
 - name: Ensure config directory exists
   file:
     path: "{{ dns_ha_agent_config_dir }}"
@@ -880,18 +958,17 @@ dns_ha_agent_http_port: 8091
     mode: '0644'
   notify: restart dns-ha-agent
 
-- name: Render docker-compose for agent
+- name: Render docker-compose for agent (pinned by digest)
   template:
     src: docker-compose.yml.j2
     dest: "{{ dns_ha_agent_compose_dir }}/docker-compose.yml"
     mode: '0644'
   notify: restart dns-ha-agent
 
-- name: Pull latest image
+- name: Pull pinned image by digest
   community.docker.docker_image:
-    name: "{{ dns_ha_agent_image }}"
+    name: "{{ dns_ha_agent_image_repo }}@{{ dns_ha_agent_image_digest }}"
     source: pull
-    force_source: yes
   notify: restart dns-ha-agent
 
 - name: Start dns-ha-agent
@@ -1020,11 +1097,18 @@ The agent does not fight you: on startup it goes through STARTING → HEALTHY no
 
 ### Rolling out a new agent version
 
-Because we use `:latest` and pull-on-deploy:
+1. CI publishes a new image on every main-branch commit. Read the new digest from the CI build output (or `docker pull` and `docker inspect` the `:latest` tag to extract its digest — these are equivalent because CI's `:latest` push and the digest are atomic).
+2. Update `dns_ha_agent_image_digest` in `group_vars/dns-edge.yml` to the new digest. Commit the change to your infrastructure repo.
+3. Canary deploy to one secondary edge:
 
 ```bash
-ansible-playbook playbooks/dns-ha-agent.yml --limit dns-iom-01    # canary
+ansible-playbook playbooks/dns-ha-agent.yml --limit dns-iom-01
 # Wait, observe /health, /metrics, logs for 30 mins
+```
+
+4. If canary is healthy, roll to the rest:
+
+```bash
 ansible-playbook playbooks/dns-ha-agent.yml --limit 'dns-edge:!dns-iom-01'
 ```
 
@@ -1032,27 +1116,29 @@ Canary should be a secondary edge (not the primary for its region), so any break
 
 ### Rollback
 
-Without immutable tags, rollback requires:
+Because deploys are digest-pinned, rollback is exact and fast:
 
 ```bash
-# 1. Revert the commit that broke things
-git revert <bad-sha>
-git push
+# 1. Set dns_ha_agent_image_digest back to the previous known-good digest
+#    (look in git history of group_vars/dns-edge.yml, or in Forgejo's registry UI)
+git revert <commit-that-bumped-digest>
+# or edit group_vars manually and commit
 
-# 2. Wait for CI to publish new :latest
-
-# 3. Re-deploy
+# 2. Re-deploy. Pulls the exact previous artifact bytes.
 ansible-playbook playbooks/dns-ha-agent.yml
 ```
 
-If urgent and revert isn't fast enough, pull the previous image SHA manually:
+The previous artifact is still in the registry (retention keeps the last 20 digests). This is byte-identical rollback, not "revert source and hope the rebuild reproduces" — important for a critical infrastructure component where a subtle base-image dep change between rebuilds could itself be the problem.
+
+For panic-mode rollback without going through ansible:
 
 ```bash
 # On affected node
 docker image ls forgejo.homelab.internal/homelab/dns-ha-agent --digests
 docker pull forgejo.homelab.internal/homelab/dns-ha-agent@sha256:<previous>
-# Edit docker-compose.yml to use the explicit digest temporarily
-docker compose up -d
+# Edit /etc/dns-ha-agent/docker-compose.yml to use the previous digest
+docker compose -f /etc/dns-ha-agent/docker-compose.yml up -d
+# Then fix the ansible vars to match, so the next playbook run doesn't undo it
 ```
 
 ---
@@ -1067,8 +1153,8 @@ Explicitly out of scope for v1, to be revisited if needed:
 - **Quorum-based peer auto-withdrawal** — peers SSH to a broken node and withdraw its route. Adds attack surface; only consider if "wait for human" response time becomes the dominant outage component.
 - **Multi-VIP support** — manage multiple VIPs from one agent (e.g., for separate internal-only DNS or service VIPs). Trivial extension; not needed v1.
 - **IPv6 support** — when the rest of the HA DNS design grows IPv6, agent grows it too.
-- **Immutable git-sha tags** — if rolling-latest causes any "oops, the broken version is everywhere" moments, switch to sha-pinned ansible deploys.
 - **A proper staging tailnet** — CI tests run against real Tailscale for the mutation path, not just mocks. Would catch CLI version drift, etc.
+- **Automated digest bump** — a small bot/script that, when CI publishes a new image, opens a PR against the infrastructure repo updating `dns_ha_agent_image_digest`. Reduces the manual step in deploys without losing the explicit-pin guarantee.
 
 ---
 
@@ -1088,14 +1174,20 @@ To be resolved during implementation, before v1.0:
 The blueprint is implemented when:
 
 - [ ] All unit and integration tests pass in CI.
-- [ ] Smoke test in CI pulls and runs the image successfully.
-- [ ] Multi-arch image (`amd64`, `arm64`) published to `forgejo.homelab.internal/homelab/dns-ha-agent:latest`.
+- [ ] Smoke test in CI pulls (by digest) and runs the image successfully.
+- [ ] Multi-arch image (`amd64`, `arm64`) published to `forgejo.homelab.internal/homelab/dns-ha-agent`; digest captured as CI build output.
+- [ ] Ansible role asserts digest is set; refuses to deploy without one.
 - [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
 - [ ] Agent transitions STARTING → HEALTHY within 10s of container start.
+- [ ] **Startup reconciliation**: if the VIP is already advertised when the agent starts (simulate by manually `tailscale set --advertise-routes=10.253.53.53/32` before starting the agent), the agent withdraws it at startup and re-advertises only after passing local probes.
 - [ ] `/health` returns valid JSON matching the schema in §6.
 - [ ] `/metrics` returns valid Prometheus format.
 - [ ] SIGTERM withdraws route within 5s and exits 0.
+- [ ] **Self-exit on hang**: forcibly hang the probe loop (e.g., inject `Thread.sleep(Long.MAX_VALUE)` in a test build). Within 30s, the `WatchdogThread` detects and the process exits non-zero. Docker `restart: unless-stopped` restarts the container.
+- [ ] **Idempotent route mutation**: calling `TailscaleClient.advertiseRoutes()` twice with the same input is a no-op the second time; calling with a different input produces the expected mutation.
+- [ ] **Preserved-routes handling**: a non-DNS route added externally to `preserved_routes` config is never wiped by the agent's withdraw operation.
 - [ ] Inducing a filter break (stop AGH on dns-ams-01) causes the agent to withdraw within `(fail_threshold × interval) + tailscale convergence` ≈ 4s + 15s.
 - [ ] Recovery after re-starting AGH: agent re-advertises within `success_threshold × interval` ≈ 6s.
 - [ ] Two agents probing each other correctly detect partition when network-partitioned in a test.
+- [ ] **Digest rollback** demonstrated: deploy digest A, deploy digest B, change ansible var back to A, redeploy, confirm image hash matches A exactly.
 - [ ] Replaces Appendix C of `HA-DNS-Analysis.md` on every edge node without regressions.
