@@ -6,6 +6,15 @@
 > - **Startup reconciliation** (§8): agent now explicitly reconciles actual Tailscale route state at boot, withdrawing stale advertisements from crashed predecessors before re-validating via probes.
 > - **Hang detection via self-exit** (§8): explicit `WatchdogThread` forces `System.exit(70)` on internal deadlock, since Docker `HEALTHCHECK` does NOT auto-restart unhealthy containers in plain Compose. `HEALTHCHECK` remains for diagnostic visibility only.
 > - **Image versioning changed from rolling `:latest` to digest pinning**: CI publishes `:latest` as a convenience pointer, but ansible deploys pin by `@sha256:...` digest, asserted non-empty by the role. Rollback is byte-identical, not "revert source and rebuild."
+> - **Tailscale socket explicitly mounted** (§11): `network_mode: host` does not expose the host filesystem socket; `/var/run/tailscale/tailscaled.sock` must be volume-mounted. Prose corrected.
+> - **Dockerfile fixed**: multi-arch Tailscale binary download uses `ARG TARGETARCH`; `HEALTHCHECK` switched to `wget` (curl is purged post-install).
+> - **Smoke test fixed** (§12): now checks out repo, generates config inline, uses `--network host`, polls with retry — no external dependencies.
+> - **Decision pipeline split into FsmReducer + Decider + Reconciler** (§7): `Decider` is now a true pure function (`FsmState → ADVERTISE/WITHDRAW`); state transitions live in `FsmReducer`; route mutation idempotency lives in `Reconciler`. `RouteStateStore` removed — source of truth is `managed_routes + preserved_routes` from config.
+> - **`managed_routes` added to config schema** (§5): explicit field replacing the implicit "managed VIP = node.vip" assumption.
+> - **`/health` LAN exposure documented** (§6): `0.0.0.0` with `network_mode: host` exposes on LAN. Mitigations (bind to Tailscale IP, or iptables rule) documented. `dns_ha_agent_bind_address` Ansible variable added.
+> - **Tailscale admin policy section added** (§14): `autoApprovers` and ACL requirements for `tag:dns-edge` documented.
+> - **DNS probe hardened** (§5): `resolve_names` (plural, at least one must pass), configurable `block_expectation` for different filter styles (NXDOMAIN vs 0.0.0.0).
+> - **Host VIP binding prerequisite documented** (§5 probe config, §16 first-deploy, §19 acceptance criteria).
 
 ---
 
@@ -82,7 +91,7 @@ This service replaces the bash watchdog originally described in `HA-DNS-Analysis
 
 | Component | Responsibility |
 |---|---|
-| `DnsProbe` | Runs dual probe (resolve `cloudflare.com`, confirm `test.blocked.internal` is filtered) against `10.253.53.53` on a configurable interval. |
+| `DnsProbe` | Runs dual probe (resolve one of `resolve_names`, confirm `block_name` matches `block_expectation`) against `10.253.53.53` on a configurable interval. |
 | `PeerMonitor` | Concurrently polls each peer's `/health` endpoint, tracks reachability and reported state. One virtual thread per peer. |
 | `HealthState` | Thread-safe holder of current state: latest probe result, fail/success counters, per-peer reachability, current advertised state. |
 | `Decider` | Pure function: given `HealthState` + config, returns `ADVERTISE` or `WITHDRAW` decision. Easy to unit-test. |
@@ -149,7 +158,7 @@ The agent transitions through these states based on probe results:
 
 1. **Single-node region (zero peers configured)**: PARTITIONED state is unreachable. Agent uses local probes only. This matches SHZ-01's role in the current topology.
 2. **Cold start safety**: STARTING → HEALTHY requires `success_threshold` probes (default 3 × 2s = 6s), so a freshly-started agent on a node where the stack isn't ready won't briefly advertise.
-3. **Idempotency**: every `Tailscale set` call sends the full intended route list, computed from a state file. The agent never sends "delta" mutations.
+3. **Idempotency**: every `tailscale set` call sends the full intended route list, computed by the `Reconciler` as `managed_routes ∪ preserved_routes` (both from config). The agent never sends "delta" mutations; it always reconciles against the full desired state. See §7 Reconciler for details.
 
 ---
 
@@ -173,12 +182,35 @@ node:
 # Local DNS probing.
 probe:
   # The DNS target the agent probes (the VIP, served by local dnsdist).
+  # PREREQUISITE: each DNS edge node must bind 10.253.53.53/32 locally on a
+  # loopback or dummy interface, and dnsdist must listen on 10.253.53.53:53.
+  # If traffic to 10.253.53.53 is routed via Tailscale instead of locally,
+  # the probe will test the wrong node (or nothing). Verify with:
+  #   ip route get 10.253.53.53   → must resolve to lo or a dummy interface
+  #   dig @10.253.53.53 cloudflare.com   → must hit local dnsdist
   target: 10.253.53.53
-  # A name that MUST resolve to a real A record (resolve check).
-  resolve_name: cloudflare.com
+  # Names that MUST resolve to real A records (resolve check).
+  # At least one must succeed for the probe to pass. Multiple names reduce
+  # brittleness from a single external domain being temporarily unreachable.
+  resolve_names:
+    - cloudflare.com
+    - example.com
   resolve_type: A
-  # A name that MUST be blocked by AGH (filter check). Custom AGH rewrite.
+  # A name that MUST be blocked by AGH (filter check). Custom AGH rewrite/blocklist entry.
   block_name: test.blocked.internal
+  # Expected response for the blocked name. Different DNS filters return different
+  # blocking styles (NXDOMAIN, REFUSED, NOERROR with 0.0.0.0, etc.).
+  # Configure to match your AGH setup to avoid false-positive unhealthy states.
+  block_expectation:
+    # must_not_return_real_ip: pass if the response is NOT a routable IP
+    # (i.e. any of allowed_rcodes, or an IP in allowed_ips, is acceptable)
+    mode: must_not_return_real_ip
+    allowed_rcodes:
+      - NXDOMAIN
+      - REFUSED
+      - NOERROR      # NOERROR is acceptable if the IP is in allowed_ips
+    allowed_ips:
+      - "0.0.0.0"    # AGH default block response
   # Probe cadence and thresholds.
   interval: 2s
   query_timeout: 2s
@@ -209,17 +241,27 @@ split_brain:
 tailscale:
   # Path to tailscale CLI in the container (baked into image).
   cli_path: /usr/bin/tailscale
-  # Additional routes to always preserve when mutating advertise list.
-  # Safety hatch for "I added a subnet route for k3s testing, don't wipe it."
+  # Routes this agent actively manages (advertise when HEALTHY, withdraw otherwise).
+  # This is the authoritative source of truth for what gets toggled. Must match
+  # node.vip. Defined explicitly so the Reconciler never has to infer intent.
+  managed_routes:
+    - 10.253.53.53/32
+  # Routes to always preserve when mutating the advertise list — never wiped,
+  # regardless of health state. Safety hatch for manually-added subnet routes
+  # (e.g. a k3s test prefix) that should survive agent restarts.
   preserved_routes: []
   # Timeout for tailscale set invocations.
   command_timeout: 10s
 
 # HTTP server config.
 http:
-  # Bind address for /health and /metrics. With --network host, this is
-  # typically the node's Tailscale IP.
-  bind_address: 0.0.0.0
+  # Bind address for /health and /metrics.
+  # WARNING: with network_mode: host, 0.0.0.0 exposes port 8091 on ALL
+  # interfaces including LAN. Tailscale ACLs do NOT protect LAN-originated
+  # traffic. Recommended: set to the node's Tailscale IP (100.x.x.x), or
+  # keep 0.0.0.0 and add a host firewall rule allowing 8091 only on tailscale0.
+  # See §6 for details.
+  bind_address: 0.0.0.0   # override in host_vars with dns_ha_agent_bind_address
   port: 8091
 
 # Observability.
@@ -289,6 +331,13 @@ The `unreachable_peers` field lists peer names this agent currently cannot reach
 
 **No authentication.** Access control is via Tailscale ACL (only `tag:dns-edge` nodes can reach port 8091 on edges). This is consistent with the homelab pattern of relying on tailnet boundary as the security perimeter.
 
+**LAN exposure caveat.** With `network_mode: host` and `bind_address: 0.0.0.0`, port 8091 is reachable from the LAN as well as via Tailscale. Tailscale ACLs only govern tailnet-originated traffic — they do not protect LAN-originated traffic. Mitigate with one of:
+
+1. **Bind to Tailscale IP** — set `http.bind_address` to the node's Tailscale IP (e.g. `100.x.x.x`) in `host_vars`. The HTTP server won't be reachable from LAN at all. This requires knowing the Tailscale IP at config time; use an Ansible variable `dns_ha_agent_bind_address` set per node.
+2. **Host firewall rule** — keep `0.0.0.0` and add an iptables rule restricting port 8091 to the `tailscale0` interface: `iptables -A INPUT -p tcp --dport 8091 ! -i tailscale0 -j DROP`. Manage via the ansible role alongside the compose template.
+
+Option 1 is preferred. The `/debug` endpoint (if added, §17 item 3) must not be exposed LAN-wide under any circumstances.
+
 ### `GET /metrics`
 
 Prometheus-format metrics. Served by `simpleclient_httpserver` integration with Jersey, or via a direct `simpleclient_servlet` mount.
@@ -339,36 +388,78 @@ dns_ha_agent_last_route_mutation_ts 1.768139601e+09
 
 ## 7. Decision Logic
 
-Pure function. Inputs: current `HealthState`, config. Output: `ADVERTISE` or `WITHDRAW`.
+The decision pipeline is split into two distinct responsibilities to keep each piece testable and free of hidden side effects:
+
+**`FsmReducer`** — computes the next FSM state from current state + new observations. This is the only place FSM transitions happen. It has no I/O.
+
+**`Decider`** — a pure function that maps an `FsmState` + config to `ADVERTISE` or `WITHDRAW`. No side effects, no state mutation. Trivially unit-testable.
+
+**`Reconciler`** — compares the `Decider`'s output against the actual Tailscale route state and invokes `TailscaleClient` only when a change is needed. Handles idempotency.
+
+### FsmReducer
 
 ```
-function decide(state, config):
-    # SHUTTING_DOWN always wins
-    if state.fsm == SHUTTING_DOWN:
-        return WITHDRAW
+function reduceState(currentState, snapshot, config) -> FsmState:
+    if currentState == SHUTTING_DOWN:
+        return SHUTTING_DOWN   # terminal, nothing overrides it
 
-    # PARTITIONED overrides healthy local probes
-    if state.fsm == PARTITIONED:
-        return WITHDRAW
-
-    # UNHEALTHY local probes
-    if state.fsm == UNHEALTHY or state.fsm == STARTING:
-        return WITHDRAW
-
-    # HEALTHY: check partition condition
-    if config.split_brain.enabled and len(config.peers) > 0:
+    # Evaluate partition condition (only from HEALTHY)
+    if currentState == HEALTHY and config.split_brain.enabled and len(config.peers) > 0:
         unreachable_count = count peers where
-            peer.reports_me_unreachable AND
-            (now - peer.first_reported_unreachable_ts) > config.split_brain.peer_unreachable_threshold
+            snapshot.peer.reports_me_unreachable AND
+            (now - snapshot.peer.first_reported_unreachable_ts) > config.split_brain.peer_unreachable_threshold
 
         if unreachable_count >= config.split_brain.min_peer_reports_to_self_withdraw:
-            transition state.fsm to PARTITIONED
-            return WITHDRAW
+            return PARTITIONED
 
-    return ADVERTISE
+    # Probe-driven transitions
+    if currentState == PARTITIONED:
+        if all_peers_reachable(snapshot) and snapshot.consecutive_successes >= 1:
+            return HEALTHY   # recover from partition once visible again
+        return PARTITIONED
+
+    if currentState in (STARTING, UNHEALTHY):
+        if snapshot.consecutive_successes >= config.probe.success_threshold:
+            return HEALTHY
+        return currentState
+
+    if currentState == HEALTHY:
+        if snapshot.consecutive_failures >= config.probe.fail_threshold:
+            return UNHEALTHY
+        return HEALTHY
+
+    return currentState
 ```
 
-The FSM transitions are evaluated on every probe cycle. The `Decider` is stateless; state is held in `HealthState`.
+### Decider (pure)
+
+```
+function decide(fsmState) -> Decision:
+    return ADVERTISE if fsmState == HEALTHY else WITHDRAW
+```
+
+That's it. The `Decider` has no knowledge of peers, thresholds, or config. All the complex logic lives in `FsmReducer`, which is also pure and stateless. State is held in `HealthState`; `FsmReducer` returns a new state value, `HealthState` applies it atomically.
+
+### Reconciler
+
+```
+function reconcile(decision, config, tailscaleClient):
+    managed  = set(config.tailscale.managed_routes)   # e.g. {"10.253.53.53/32"}
+    preserved = set(config.tailscale.preserved_routes) # routes never wiped
+
+    actual = tailscaleClient.currentlyAdvertised()
+
+    if decision == ADVERTISE:
+        desired = managed ∪ preserved
+    else:
+        desired = preserved   # withdraw managed, keep preserved
+
+    if actual != desired:
+        tailscaleClient.advertiseRoutes(desired)
+        # log route_mutation event
+```
+
+The source of truth for what to advertise is always `managed_routes + preserved_routes` from config — never a separate state file. The Reconciler calls `tailscaleClient.currentlyAdvertised()` on every cycle to detect and correct any drift (e.g., an external `tailscale set` by an operator), not only on state transitions.
 
 ---
 
@@ -500,12 +591,13 @@ dns-ha-agent/
     │   │   │   ├── HealthState.java           # Thread-safe state holder
     │   │   │   └── FsmState.java              # Enum
     │   │   ├── decide/
-    │   │   │   ├── Decider.java
+    │   │   │   ├── FsmReducer.java            # Pure: state + snapshot → nextState
+    │   │   │   ├── Decider.java               # Pure: fsmState → ADVERTISE/WITHDRAW
+    │   │   │   ├── Reconciler.java            # Compares decision vs actual TS state
     │   │   │   └── Decision.java              # ADVERTISE | WITHDRAW
     │   │   ├── tailscale/
     │   │   │   ├── TailscaleClient.java       # Interface
-    │   │   │   ├── CliTailscaleClient.java    # Subprocess impl
-    │   │   │   └── RouteStateStore.java       # Persists intended routes
+    │   │   │   └── CliTailscaleClient.java    # Subprocess impl
     │   │   ├── http/
     │   │   │   ├── HealthServer.java
     │   │   │   ├── HealthResource.java        # Jersey @Path("/health")
@@ -561,10 +653,31 @@ public final class HealthState {
     public synchronized HealthSnapshot snapshot();   // immutable view for /health
 }
 
-// Decider — pure
-public final class Decider {
-    public static Decision decide(HealthState state, Config config);
+// FsmReducer — pure: (currentState, HealthSnapshot, Config) → nextFsmState
+public final class FsmReducer {
+    public static FsmState reduce(FsmState current, HealthSnapshot snapshot, Config config);
 }
+
+// Decider — pure: fsmState → ADVERTISE | WITHDRAW (no config needed)
+public final class Decider {
+    public static Decision decide(FsmState state);
+}
+
+// Reconciler — compares decision against actual Tailscale state, mutates only on drift
+public final class Reconciler {
+    public void reconcile(Decision decision, Config config, TailscaleClient client)
+        throws TailscaleException;
+}
+
+// TailscaleConfig — part of Config record
+// managed_routes: routes toggled by health state (advertised when HEALTHY, withdrawn otherwise)
+// preserved_routes: routes never wiped, regardless of state
+public record TailscaleConfig(
+    String cliPath,
+    List<String> managedRoutes,
+    List<String> preservedRoutes,
+    Duration commandTimeout
+) { }
 
 // TailscaleClient — interface
 public interface TailscaleClient {
@@ -658,10 +771,11 @@ tasks.shadowJar {
 | Module | What to test |
 |---|---|
 | `ConfigLoader` | Valid YAML parses; invalid YAML rejected with clear error; unknown version exits with code 78; default values applied. |
-| `Decider` | Every FSM state → correct decision. Partition logic respects peer count threshold. Empty peer list disables partition logic. |
+| `FsmReducer` | Every (state, snapshot) combination → expected next state. Partition threshold respected. Single-node (zero peers) never reaches PARTITIONED. |
+| `Decider` | HEALTHY → ADVERTISE; all other states → WITHDRAW. |
+| `Reconciler` | Advertise + routes already correct → no tailscale call. Advertise + drift detected → correct call. Withdraw → only preserved_routes remain. |
 | `HealthState` | Counters increment correctly; threshold transitions fire at right moments; snapshot is consistent under concurrent updates. |
-| `DnsProbe` | Mocked dnsjava Resolver: success on real IP, failure on NXDOMAIN for resolve_name, failure on real IP for block_name, failure on timeout. |
-| `RouteStateStore` | Round-trip persistence; corrupted state file → safe default (empty). |
+| `DnsProbe` | Mocked dnsjava Resolver: success when at least one resolve_name returns a real IP; failure when all resolve_names fail; failure when block_name returns a routable IP not in allowed_ips; pass when block_name returns an allowed_rcode or allowed_ip; failure on timeout. |
 | `CliTailscaleClient` | Subprocess invocation arguments correct; non-zero exit → exception; timeout → exception. (Uses an interface-mocked `ProcessBuilder`-equivalent.) |
 
 ### Integration tests (Testcontainers)
@@ -702,17 +816,25 @@ RUN ./gradlew --no-daemon shadowJar
 
 # Runtime
 FROM eclipse-temurin:21-jre-jammy
+# TARGETARCH is injected by Docker BuildKit (amd64 | arm64).
+# Tailscale's archive names match Docker's TARGETARCH values on our platforms.
+ARG TARGETARCH
 ARG TAILSCALE_VERSION=1.74.0
 
 # Install tailscale CLI (for subprocess invocations).
 # Pinned version for reproducibility; bump deliberately.
-RUN apt-get update && \
+RUN case "${TARGETARCH}" in \
+      amd64) TS_ARCH="amd64" ;; \
+      arm64) TS_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
-    curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" \
+    curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}.tgz" \
       | tar -xz -C /tmp && \
-    mv "/tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscale" /usr/bin/tailscale && \
+    mv "/tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}/tailscale" /usr/bin/tailscale && \
     chmod +x /usr/bin/tailscale && \
-    rm -rf /tmp/tailscale_${TAILSCALE_VERSION}_amd64 && \
+    rm -rf /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH} && \
     apt-get purge -y curl && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
@@ -724,8 +846,9 @@ COPY config/example.yaml /etc/dns-ha-agent/example.yaml
 # monitoring. It does NOT trigger restarts (Docker/Compose does not auto-restart
 # on unhealthy alone). Recovery from hangs comes from the agent self-exiting
 # via its internal WatchdogThread, plus `restart: unless-stopped`.
+# Uses wget (present in eclipse-temurin:jammy base) — curl is purged above.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8091/health || exit 1
+    CMD wget -qO- http://localhost:8091/health > /dev/null || exit 1
 
 EXPOSE 8091
 ENTRYPOINT ["java", "-jar", "/app/dns-ha-agent.jar", "--config", "/etc/dns-ha-agent/config.yaml"]
@@ -751,6 +874,14 @@ services:
     volumes:
       - /etc/dns-ha-agent/config.yaml:/etc/dns-ha-agent/config.yaml:ro
       - /var/lib/dns-ha-agent:/var/lib/dns-ha-agent
+      # REQUIRED: mount the host tailscaled socket so the agent can invoke
+      # `tailscale set` via the LocalAPI. network_mode: host shares the network
+      # namespace only — it does NOT expose the host filesystem socket.
+      # Without this mount every tailscale set call will fail.
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+    environment:
+      # Tell the Tailscale CLI where to find the socket (matches the mount path).
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
     deploy:
       resources:
         limits:
@@ -763,7 +894,7 @@ services:
         max-file: "3"
 ```
 
-Host network mode is required so the agent's HTTP server binds on the node's Tailscale IP and `tailscale` CLI talks to the host's tailscaled socket without explicit mounting.
+Host network mode is required so the agent's HTTP server binds on the node's Tailscale IP. It does **not** give the container automatic access to the host's tailscaled socket — that requires explicitly mounting `/var/run/tailscale/tailscaled.sock` (see compose snippet above). Without the socket mount the container will start and pass its own healthcheck, then fail every `tailscale set` call silently.
 
 ---
 
@@ -839,17 +970,76 @@ jobs:
     needs: build-and-push
     runs-on: docker
     steps:
+      - uses: actions/checkout@v4
       - name: Pull and smoke-test (by digest)
         run: |
           DIGEST="${{ needs.build-and-push.outputs.digest }}"
           IMAGE="forgejo.homelab.internal/homelab/dns-ha-agent@${DIGEST}"
           docker pull "${IMAGE}"
+
+          # Generate a self-contained single-node config with no peers.
+          # The probe target (127.0.0.1:53) won't resolve correctly, so the
+          # agent will stay in STARTING/UNHEALTHY — that's fine. We're testing
+          # that the JVM starts, the HTTP server comes up, and /health responds.
+          # No external dependencies (no httpbin, no real DNS, no Tailscale).
+          cat > /tmp/smoke-config.yaml << 'EOF'
+          version: 1
+          node:
+            name: smoke-test
+            region: ci
+            vip: 10.253.53.53/32
+          probe:
+            target: 127.0.0.1
+            resolve_name: cloudflare.com
+            resolve_type: A
+            block_name: test.blocked.internal
+            interval: 2s
+            query_timeout: 1s
+            fail_threshold: 2
+            success_threshold: 3
+          peers: []
+          split_brain:
+            enabled: false
+            peer_poll_interval: 15s
+            peer_poll_timeout: 5s
+            peer_unreachable_threshold: 60s
+            min_peer_reports_to_self_withdraw: 2
+          tailscale:
+            cli_path: /usr/bin/tailscale
+            preserved_routes: []
+            command_timeout: 10s
+          http:
+            bind_address: 0.0.0.0
+            port: 8091
+          logging:
+            format: JSON
+            level: INFO
+          metrics:
+            enabled: true
+            path: /metrics
+          EOF
+
+          # --network host so curl on the runner can reach port 8091 directly.
           docker run -d --name smoke --rm \
-            -v ./test-config.yaml:/etc/dns-ha-agent/config.yaml \
+            --network host \
+            -v /tmp/smoke-config.yaml:/etc/dns-ha-agent/config.yaml:ro \
             "${IMAGE}"
-          sleep 30
-          curl -fsS http://localhost:8091/health
-          docker stop smoke
+
+          # Poll for up to 30s — JVM startup can take a few seconds.
+          for i in $(seq 1 10); do
+            sleep 3
+            if curl -fsS http://localhost:8091/health > /dev/null 2>&1; then
+              echo "Smoke test passed (attempt ${i})"
+              docker stop smoke
+              exit 0
+            fi
+            echo "Attempt ${i}: not ready yet..."
+          done
+
+          echo "Smoke test FAILED: /health did not respond within 30s"
+          docker logs smoke || true
+          docker stop smoke || true
+          exit 1
 ```
 
 **Versioning**: every main-branch commit publishes a new image to the Forgejo registry. The `:latest` tag is published as a convenience pointer for humans browsing the registry, but **deployments pin by digest** (`sha256:...`) via the ansible variable `dns_ha_agent_image_digest`. CI exposes the digest as a job output and as a build artifact, so the new digest can be read from CI after a successful build.
@@ -872,7 +1062,52 @@ jobs:
 
 ---
 
-## 14. Deployment (Ansible Role)
+## 14. Tailscale Admin Policy Requirements
+
+Before deploying, ensure the following are configured in your Tailscale admin console (or `policy.hujson` if using GitOps):
+
+### Route auto-approval for `tag:dns-edge`
+
+Without this, a newly deployed or re-authenticated node will advertise `10.253.53.53/32` but the route won't be active until a Tailscale admin manually approves it — silently breaking DNS failover for that node.
+
+```json
+"autoApprovers": {
+  "routes": {
+    "10.253.53.53/32": ["tag:dns-edge"]
+  }
+}
+```
+
+This grants nodes tagged `tag:dns-edge` the right to have their `10.253.53.53/32` advertisement automatically approved. Apply the tag in your node registration (`tailscale up --advertise-tags=tag:dns-edge`) or via the admin console.
+
+### ACL for peer health polling
+
+Peers poll each other's `/health` endpoint on port 8091. The ACL must permit this:
+
+```json
+"acls": [
+  {
+    "action": "accept",
+    "src": ["tag:dns-edge"],
+    "dst": ["tag:dns-edge:8091"]
+  }
+]
+```
+
+If Prometheus scrapes `/metrics` from a monitoring node, add that tag/IP to the `src` list as well.
+
+### First-deploy checklist
+
+Before running the ansible role on a new node:
+
+- [ ] Node registered with `tag:dns-edge` applied.
+- [ ] `autoApprovers` policy deployed to Tailscale admin.
+- [ ] ACL permitting `tag:dns-edge → tag:dns-edge:8091` is active.
+- [ ] Verify with: `tailscale status` on the new node shows the route as approved (not just advertised) after the agent first reaches HEALTHY.
+
+---
+
+## 15. Deployment (Ansible Role)
 
 ### Role structure
 
@@ -907,6 +1142,9 @@ dns_ha_agent_node_region: ""        # MUST set in host_vars
 dns_ha_agent_vip: "10.253.53.53/32"
 dns_ha_agent_peers: []              # MUST set in host_vars
 dns_ha_agent_http_port: 8091
+# Recommended: override in host_vars with the node's Tailscale IP (100.x.x.x)
+# to avoid exposing /health on the LAN interface. See §6 for details.
+dns_ha_agent_bind_address: "0.0.0.0"
 ```
 
 ### `tasks/main.yml` (skeleton — note digest pinning)
@@ -1021,11 +1259,13 @@ split_brain:
 
 tailscale:
   cli_path: /usr/bin/tailscale
+  managed_routes:
+    - {{ dns_ha_agent_vip }}
   preserved_routes: []
   command_timeout: 10s
 
 http:
-  bind_address: 0.0.0.0
+  bind_address: {{ dns_ha_agent_bind_address }}
   port: {{ dns_ha_agent_http_port }}
 
 logging:
@@ -1052,17 +1292,25 @@ dns_ha_agent_peers:
 
 ---
 
-## 15. Operational Playbook
+## 16. Operational Playbook
 
 ### First-time deployment to a new edge
 
 1. Ensure host has Docker + Compose plugin, tailscaled installed, tag `tag:dns-edge` applied.
-2. Add node to ansible inventory with `dns_ha_agent_node_region` and `dns_ha_agent_peers` set.
-3. Run `ansible-playbook -l <new-node> playbooks/dns-ha-agent.yml`.
-4. Watch logs: `docker logs -f dns-ha-agent`.
-5. Verify in `/health` that state transitions STARTING → HEALTHY after ~6s.
-6. Confirm `tailscale status` on the node shows `10.253.53.53/32` advertised and approved.
-7. Update peer agents' configs (add new node to their peer lists), re-run ansible against them.
+2. **Verify host VIP binding** — before starting the agent, confirm the node has `10.253.53.53/32` bound locally and dnsdist is listening there:
+   ```bash
+   ip route get 10.253.53.53   # must show src via lo or dummy, NOT via tailscale
+   dig @10.253.53.53 cloudflare.com +short   # must return a real IP from local dnsdist
+   dig @10.253.53.53 test.blocked.internal   # must return blocked response
+   ```
+   If the first command routes via Tailscale, the agent's probes will test a remote node, not itself. Fix the host networking before proceeding.
+3. Confirm Tailscale admin policy has `autoApprovers` for `10.253.53.53/32` on `tag:dns-edge` (§14).
+4. Add node to ansible inventory with `dns_ha_agent_node_region`, `dns_ha_agent_peers`, and `dns_ha_agent_bind_address` (Tailscale IP) set.
+5. Run `ansible-playbook -l <new-node> playbooks/dns-ha-agent.yml`.
+6. Watch logs: `docker logs -f dns-ha-agent`.
+7. Verify in `/health` that state transitions STARTING → HEALTHY after ~6s.
+8. Confirm `tailscale status` on the node shows `10.253.53.53/32` advertised **and approved** (not just advertised).
+9. Update peer agents' configs (add new node to their peer lists), re-run ansible against them.
 
 ### Removing an edge
 
@@ -1143,7 +1391,7 @@ docker compose -f /etc/dns-ha-agent/docker-compose.yml up -d
 
 ---
 
-## 16. Future Considerations
+## 17. Future Considerations
 
 Explicitly out of scope for v1, to be revisited if needed:
 
@@ -1158,18 +1406,18 @@ Explicitly out of scope for v1, to be revisited if needed:
 
 ---
 
-## 17. Open Questions
+## 18. Open Questions
 
 To be resolved during implementation, before v1.0:
 
 1. **Container base image choice**: stick with `eclipse-temurin:21-jre-jammy` or move to `eclipse-temurin:21-jre-alpine` for size? Alpine has occasional musl-vs-glibc surprises with JNI; jammy is safer.
 2. **Logback vs `java.util.logging`**: Logback is the default recommendation. JUL is bundled. If keeping deps minimal matters more than log formatting flexibility, JUL is acceptable.
 3. **Whether to include a `/debug` endpoint** (current state dump, force-withdraw, force-probe) — useful for ops but adds attack surface. Probably yes but gated behind an env-var flag.
-4. **What to do when the local probe target IP (10.253.53.53) is unreachable from the agent container** at all — this would mean dnsdist isn't even listening, not a soft failure. Currently treated identically to NXDOMAIN. Worth a distinct "DNSDIST_DOWN" probe result for clearer logs.
+4. **What to do when the local probe target IP (10.253.53.53) is unreachable from the agent container** at all — this would mean dnsdist isn't even listening, not a soft failure. Resolve: add a distinct `DNSDIST_DOWN` probe result enum value for connection-refused / timeout-at-TCP-level (before any DNS response). Log it at ERROR with the label `probe_result=DNSDIST_DOWN` for operator visibility. Both `DNSDIST_DOWN` and generic probe failure count against `fail_threshold` identically — the distinction is diagnostic, not behavioural.
 
 ---
 
-## 18. Acceptance Criteria for v1.0
+## 19. Acceptance Criteria for v1.0
 
 The blueprint is implemented when:
 
@@ -1178,6 +1426,7 @@ The blueprint is implemented when:
 - [ ] Multi-arch image (`amd64`, `arm64`) published to `forgejo.homelab.internal/homelab/dns-ha-agent`; digest captured as CI build output.
 - [ ] Ansible role asserts digest is set; refuses to deploy without one.
 - [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
+- [ ] **Host VIP binding verified on every edge**: `ip route get 10.253.53.53` resolves to a local interface (lo or dummy), not via Tailscale. `dig @10.253.53.53 cloudflare.com` returns a real IP from local dnsdist. Both commands must pass on each node before the agent is started. Document this as a pre-flight step in the first-deploy playbook.
 - [ ] Agent transitions STARTING → HEALTHY within 10s of container start.
 - [ ] **Startup reconciliation**: if the VIP is already advertised when the agent starts (simulate by manually `tailscale set --advertise-routes=10.253.53.53/32` before starting the agent), the agent withdraws it at startup and re-advertises only after passing local probes.
 - [ ] `/health` returns valid JSON matching the schema in §6.
