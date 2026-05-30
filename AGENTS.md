@@ -6,7 +6,7 @@ Read this before making any changes to the HA DNS design or rollout. These are i
 
 - This is **production DNS** for the homelab tailnet. iOS, in particular, loses DNS entirely when its first-listed resolver fails — this whole design exists because the v0 setup was unreliable for iOS clients.
 - The design is **fail-closed**. If filtering can't be applied, DNS breaks rather than silently resolving unfiltered. Do not introduce fallback paths that violate this.
-- The `dns-ha-agent` is the **sole authority** for mutating Tailscale route advertisements for the HA VIP. Do not write code or scripts that call `tailscale set --advertise-routes=...` outside the agent.
+- The `dns-ha-agent` is the **sole authority for *local self-mutation*** of each edge's Tailscale route advertisement (i.e., the only thing that runs `tailscale set --advertise-routes=...` on that host). Do not write code or scripts that call `tailscale set --advertise-routes=...` outside the agent. The n8n external fencer (see `BLUEPRINT.md` Appendix E) operates at a different layer: it disables a node's *approved* route centrally via the Tailscale API for fail-open remediation, and is intentionally outside the agent process.
 
 ## Where to read first
 
@@ -28,7 +28,7 @@ Read this before making any changes to the HA DNS design or rollout. These are i
 5. **No cross-region dnsdist backends**. Each edge's dnsdist pool contains only AGH instances in its own region. Cross-region failover happens at the Tailscale layer, not the dnsdist layer.
 6. **AGH config changes happen on dns-ams-01 only**. `adguardhome-sync` propagates to replicas. Editing replicas directly creates drift.
 7. **The dnsdist webserver is disabled by default**. If you need it for debugging, follow the credentials-from-file pattern documented in `BLUEPRINT.md` §Appendix B — never re-enable with placeholder passwords.
-8. **Tailscale ACL is the security boundary for `:8091` (agent health) and `:3000` (AGH admin)**. Host firewall (ufw) is the secondary boundary for LAN-side restriction. Both must be in place.
+8. **Three layers protect `:8091` (agent health/metrics) and `:1053` (dnsdist diagnostic listener for n8n fencing)**: (1) bind to the node's Tailscale IP, not `0.0.0.0` (`network_mode: host` + wildcard bind would leak the endpoint on the LAN NIC, and Tailscale ACLs do not see LAN traffic); (2) host firewall (UFW) denies the port from non-Tailscale sources as defence-in-depth; (3) Tailscale ACL restricts which tailnet members can reach it (`tag:dns-edge` peers and `tag:dns-fencer` for n8n). All three must be in place. `:3000` (AGH admin) uses the same three-layer model, restricted to `tag:agh-admin`.
 
 ## Things that look like good ideas but break the design
 
