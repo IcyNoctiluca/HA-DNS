@@ -19,7 +19,7 @@ Design complete (v3). Rollout pending; the dependent `dns-ha-agent` service is u
 
 The HA layer depends on a containerised health agent that probes the local DNS stack and mutates Tailscale route advertisements. That service has its own document set:
 
-- [`../dns-ha-agent/`](../dns-ha-agent/) — service blueprint, implementation phases, agent conventions.
+- [`dns-ha-agent/`](dns-ha-agent/) — service blueprint, implementation phases, agent conventions.
 
 ## Out of scope
 

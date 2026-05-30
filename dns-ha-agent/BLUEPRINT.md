@@ -1,6 +1,6 @@
 # dns-ha-agent — Service Blueprint
 
-> Source-of-truth design and spec for the agent. For phase-ordered implementation steps and per-phase acceptance criteria, see [`PHASES.md`](PHASES.md). For the wider HA DNS context, see [`../ha-dns/BLUEPRINT.md`](../ha-dns/BLUEPRINT.md).
+> Source-of-truth design and spec for the agent. For phase-ordered implementation steps and per-phase acceptance criteria, see [`PHASES.md`](PHASES.md). For the wider HA DNS context, see [`../BLUEPRINT.md`](../BLUEPRINT.md).
 
 ## 1. Purpose
 

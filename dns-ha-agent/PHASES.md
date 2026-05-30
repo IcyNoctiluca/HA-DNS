@@ -187,7 +187,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 
 ## Phase 7 — v1.0 acceptance (gate to production)
 
-**Goal**: prove the agent is ready to manage real production DNS. This is the gate before [`../ha-dns/PHASES.md`](../ha-dns/PHASES.md) Phase 8 (production cutover) can be advanced.
+**Goal**: prove the agent is ready to manage real production DNS. This is the gate before [`../PHASES.md`](../PHASES.md) Phase 8 (production cutover) can be advanced.
 
 ### Acceptance criteria (full v1.0 set)
 
@@ -208,4 +208,4 @@ The phases are designed so each one can be merged to main and yield a working (i
 - [ ] Recovery after re-starting AGH: agent re-advertises within `success_threshold × interval` ≈ 6s.
 - [ ] Two agents probing each other correctly detect partition when network-partitioned in a test.
 - [ ] **Digest rollback** demonstrated: deploy digest A, deploy digest B, change ansible var back to A, redeploy, confirm image hash matches A exactly.
-- [ ] Replaces the bash watchdog (which was historically referenced in `../ha-dns/`) on every edge node without regressions.
+- [ ] Replaces the bash watchdog (which was historically referenced in `../`) on every edge node without regressions.
