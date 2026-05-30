@@ -198,8 +198,11 @@ The phases are designed so each one can be merged to main and yield a working (i
 - [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
 - [ ] Agent transitions STARTING → HEALTHY within 10s of container start.
 - [ ] **Startup reconciliation**: if the VIP is already advertised when the agent starts (simulate by manually `tailscale set --advertise-routes=10.253.53.53/32` before starting the agent), the agent withdraws it at startup and re-advertises only after passing local probes.
-- [ ] `/health` returns valid JSON matching the schema in `BLUEPRINT.md` §6.
-- [ ] `/metrics` returns valid Prometheus format.
+- [ ] `/health` returns valid JSON matching the schema in `BLUEPRINT.md` §6 — including `desired_vip_advertised`, `fail_open`, and `force_withdraw_active` fields.
+- [ ] `/metrics` returns valid Prometheus format including `dns_ha_agent_fail_open` and `dns_ha_agent_fail_open_duration_seconds`.
+- [ ] **Fail-open metric correctness**: if the effective decision is WITHDRAW but a managed route remains advertised after a mutation failure, `/metrics` exposes `dns_ha_agent_fail_open 1` and `/health` exposes `fail_open: true`. The `_duration_seconds` gauge tracks elapsed time correctly and resets when the route is withdrawn.
+- [ ] **Force-withdraw override**: creating `/var/lib/dns-ha-agent/force-withdraw` causes withdrawal within one probe cycle and `/health` exposes `force_withdraw_active: true`; removing it resumes normal operation.
+- [ ] **`tailscale.mode` enforcement**: starting the agent with `tailscale.mode: noop` in production (without `DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true`) exits non-zero with a clear error. Starting with `mode: cli` but no reachable Tailscale CLI/socket also exits non-zero.
 - [ ] SIGTERM withdraws route within 5s and exits 0.
 - [ ] **Self-exit on hang**: forcibly hang the probe loop (e.g., inject `Thread.sleep(Long.MAX_VALUE)` in a test build). Within 30s, the `WatchdogThread` detects and the process exits non-zero. Docker `restart: unless-stopped` restarts the container.
 - [ ] **Idempotent route mutation**: calling `TailscaleClient.advertiseRoutes()` twice with the same input is a no-op the second time; calling with a different input produces the expected mutation.

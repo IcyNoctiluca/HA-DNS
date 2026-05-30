@@ -314,6 +314,49 @@ sudo tailscale up
 
 - [ ] dns-ams-01 reconverges; route is re-advertised once agent passes probes.
 
+### Test 6e — n8n external route fencing (fail-open)
+
+Validates Layer 2 of the failover model (see [`BLUEPRINT.md`](BLUEPRINT.md) §"External Route Fencing via n8n" and Appendix E). The goal is to confirm n8n correctly fences a zombie-advertised edge that the agent itself cannot withdraw.
+
+Prerequisites: n8n workflow deployed on the Mac Studio with the `tag:dns-fencer` Tailscale tag and a scoped Tailscale API token.
+
+```bash
+ssh dns-ams-01
+
+# Step 1: break the local DNS stack
+sudo systemctl stop dnsdist
+
+# Step 2: simulate the agent being unable to mutate Tailscale state.
+# Pick one of (use whichever fits your container layout):
+#   (a) Stop the agent entirely:  docker stop dns-ha-agent
+#   (b) Break the Tailscale socket mount in a compose override and recreate the container
+#   (c) Make the configured tailscale CLI path invalid in a test config override
+```
+
+- [ ] Either: dns-ha-agent reports `state != HEALTHY` and `dns_ha_agent_fail_open == 1`,
+      OR: agent is unreachable from n8n and the Tailscale API still reports the route enabled.
+- [ ] External per-edge DNS probe to `<AMS01_TS_IP>:5353` fails (or returns broken results).
+- [ ] Within ~60–90s (one n8n poll + threshold), n8n disables `dns-ams-01`'s `10.253.53.53/32` route approval via the Tailscale API.
+- [ ] n8n sends the configured alert and writes an audit record (node, evidence, action, API response, timestamp).
+- [ ] From a tailnet client, `dig @10.253.53.53 cloudflare.com` resolves via another edge.
+
+AutoApprover interaction check:
+
+- [ ] Confirm the disabled route stays disabled and is NOT immediately re-approved by `autoApprovers` while the node still has `tag:dns-edge`. If it is re-approved, move to the two-tag `tag:dns-edge-active` model documented in Appendix E.
+
+Restore:
+
+```bash
+ssh dns-ams-01
+sudo systemctl start dnsdist
+# Undo whichever simulation step you used in Step 2
+docker start dns-ha-agent  # if you stopped it
+# In the Tailscale Admin Console, manually re-enable dns-ams-01's 10.253.53.53/32 route approval
+# Clear the n8n fenced-state record so the next workflow run does not re-disable it
+```
+
+- [ ] dns-ams-01 returns to HEALTHY and re-advertises the VIP within ~10s of the route approval being restored.
+
 ---
 
 ## Phase 7 — Empirically verify Tailscale primary-selection
@@ -345,7 +388,8 @@ Do not advance to this phase until Phases 1–7 all show green acceptance criter
 
 - All edges report HEALTHY in `/health`.
 - All edges advertise the VIP and routes are auto-approved.
-- Test 6a/b/c/d all passed.
+- Test 6a/b/c/d/e all passed (including the n8n fail-open fencing test).
+- n8n route-fencing workflow is deployed on the Mac Studio with the `tag:dns-fencer` ACL and a working Tailscale API token; alerts are reaching their destination.
 - dns-ha-agent acceptance criteria in `dns-ha-agent/PHASES.md` all passed.
 
 ### Steps
