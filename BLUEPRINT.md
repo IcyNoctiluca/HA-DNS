@@ -45,7 +45,7 @@ Both systems can run on the same physical machine without conflict, as detailed 
 
 ### The Core Mechanism
 
-Pick a private IP that overlaps with none of your LANs, bind it on the loopback of every DNS edge node, and have each node advertise it as a Tailscale subnet route. Tailscale DNS points at this single IP. Tailscale handles node-level failover transparently; dnsdist handles backend health-checking; AdGuard Home instances (kept identical via adguardhome-sync) provide filtering and are fully fungible. The `dns-ha-agent` running on each edge handles service-level health detection and route mutation.
+Pick a private IP that overlaps with none of your LANs, bind it on the loopback of every DNS edge node, and have each node advertise it as a Tailscale subnet route. Tailscale DNS points at this single IP. Tailscale handles node-level failover transparently; dnsdist handles backend health-checking; AdGuard Home instances (kept identical via adguardhome-sync) provide filtering and are fully fungible. The `dns-ha-agent` running on each edge handles the fast service-level self-withdraw path. A separate n8n workflow on the always-on Mac Studio provides the slower external route-fencing path for the dangerous case where a broken edge remains advertised despite the agent deciding it should withdraw.
 
 ```
 Reserved:    10.253.53.0/24  (tailnet service VIPs — never assign to LANs, DHCP, Docker, or k3s)
@@ -55,6 +55,16 @@ Tailscale DNS → 10.253.53.53 (single entry, Override DNS enabled)
 ```
 
 This address range avoids conflicts with common home ranges (`192.168.x.x`), common lab/cloud ranges (`10.0–10.10.x.x`), and Tailscale's own CGNAT block (`100.64.0.0/10`). The whole `/24` is reserved so future tailnet service VIPs can draw from it without collision risk.
+
+The HA model is deliberately layered:
+
+| Layer | Handles | Mechanism |
+|---|---|---|
+| **Layer 0 — Tailscale node-level failover** | Machine offline, Tailscale down, power loss | Tailscale stops routing to the disconnected subnet router and converges to another advertised edge. |
+| **Layer 1 — dns-ha-agent self-withdraw** | dnsdist/AGH/Unbound failure while the node is still online | Local agent detects service failure and withdraws this node's `10.253.53.53/32` advertisement. |
+| **Layer 2 — n8n external route fencing** | Fail-open cases where the node is unhealthy but still advertised | n8n corroborates the failure from outside the node and disables that node's route approval via the Tailscale API. |
+
+Layer 2 is not the primary failover path. It is a remediation layer for the specific zombie-advertisement failure class: `desired=WITHDRAW` but the VIP remains advertised/approved (e.g., the agent crashed via SIGKILL, the Tailscale socket is unreachable from the container, or the CLI mutation persistently fails).
 
 **Tailscale tag and route auto-approval** — each DNS edge node is tagged `tag:dns-edge`. The ACL policy grants this tag permission to advertise `10.253.53.53/32` and marks it for automatic approval. This is required because `dns-ha-agent` will withdraw and re-advertise the route on service failures — manual approval in the admin console on every cycle would make the agent useless in practice.
 
@@ -78,12 +88,13 @@ The same ACL also restricts both the agent's peer-health endpoint (TCP 8091) and
 {
   "tagOwners": {
     "tag:dns-edge":    ["autogroup:admin"],
-    "tag:agh-admin":   ["autogroup:admin"]
+    "tag:agh-admin":   ["autogroup:admin"],
+    "tag:dns-fencer":  ["autogroup:admin"]
   },
   "acls": [
     {
       "action": "accept",
-      "src":    ["tag:dns-edge"],
+      "src":    ["tag:dns-edge", "tag:dns-fencer"],
       "dst":    ["tag:dns-edge:8091"]
     },
     {
@@ -95,7 +106,41 @@ The same ACL also restricts both the agent's peer-health endpoint (TCP 8091) and
 }
 ```
 
-Apply `tag:agh-admin` to the Mac Studio (sync daemon) and any admin laptops/devices. All other tailnet clients are denied by default (Tailscale ACLs are deny-by-default once any policy is defined). Note: Tailscale ACLs do not affect LAN traffic — host firewall rules (see [`PHASES.md`](PHASES.md) Phase 1) also restrict `:3000` from the local LAN.
+Apply `tag:agh-admin` to the Mac Studio (sync daemon) and any admin laptops/devices. Apply `tag:dns-fencer` to the always-on Mac Studio/n8n host so it can poll edge `/health` and `/metrics` endpoints. All other tailnet clients are denied by default (Tailscale ACLs are deny-by-default once any policy is defined). Note: Tailscale ACLs do not affect LAN traffic — host firewall rules (see [`PHASES.md`](PHASES.md) Phase 1) also restrict `:3000` from the local LAN.
+
+---
+
+### External Route Fencing via n8n
+
+`dns-ha-agent` is still the fast path: healthy nodes advertise, unhealthy nodes self-withdraw. The n8n workflow is a slower, external safety path for **fail-open** states where the agent or host can no longer perform its own withdrawal (SIGKILL'd agent, container that lost its Tailscale socket mount, persistent CLI mutation failures, host kernel hang, etc.).
+
+The n8n workflow runs on the always-on Mac Studio and polls each edge every 30 seconds. For each edge, it combines three classes of evidence:
+
+1. **Agent self-report** — `/health` and `/metrics`, especially `dns_ha_agent_fail_open` and `dns_ha_agent_fail_open_duration_seconds`.
+2. **External per-edge DNS probe** — query that edge directly over its Tailscale IP, not the shared VIP. Initially this can probe AGH on `<EDGE_TS_IP>:5353`; a future dnsdist diagnostic listener on `<EDGE_TS_IP>:1053` would test the full dnsdist → AGH → Unbound path.
+3. **Tailscale route state** — the node's `10.253.53.53/32` route is still advertised/approved/enabled according to the Tailscale API.
+
+n8n may fence an edge only when all guardrails pass:
+
+```text
+route_enabled_for_edge == true
+AND edge_externally_unhealthy == true
+AND (
+  dns_ha_agent_fail_open == 1
+  OR agent_unreachable_for > threshold
+  OR quorum_peers_report_unhealthy
+)
+AND at_least_one_other_edge_healthy == true
+AND failure_persists_for >= 60s
+```
+
+The remediation action is to disable that specific node's approved `10.253.53.53/32` route via the Tailscale API. This bypasses the failed node's local Docker, `tailscaled` socket, and Tailscale CLI path. n8n must alert and write an audit record containing node, evidence, action, API response, and timestamp.
+
+Re-enable is **manual by default**. A fenced node should be repaired, verified healthy, and then re-enabled by an operator. Automatic re-enable is intentionally deferred to avoid flapping a partially repaired node back into the active DNS path.
+
+Important caveat: test the interaction between `autoApprovers` and API-based route disabling. If a disabled route is immediately re-approved because the node still has `tag:dns-edge`, use a separate active tag pattern (`tag:dns-edge-active`) or keep n8n's fenced state active until manual clearance.
+
+Full operational detail — Tailscale API secret handling, per-edge evidence collection commands, audit log format, and the autoApprover interaction test — is in [Appendix E](#appendix-e-external-route-remediation-via-n8n).
 
 ---
 
@@ -110,9 +155,10 @@ Apply `tag:agh-admin` to the Mac Studio (sync daemon) and any admin laptops/devi
 | **AGH backend only** | TOR-02 Pi 5 | TOR-02 | NA | NA AGH backend. Does not advertise VIP, run dnsdist, or run dns-ha-agent. Also runs Pi-hole for TOR-02 LAN. |
 | **AGH backend only (future)** | HOU-01 Pi 5 | HOU-01 | NA | NA AGH backend once provisioned. Does not advertise VIP. Candidate for Technitium evaluation — see Appendix G. |
 | **AGH config sync daemon** | Mac Studio | AMS-01 | — | Runs adguardhome-sync in Docker (OrbStack). Pulls from dns-ams-01 AGH, pushes to all replicas globally. |
+| **External route-fencing controller** | Mac Studio | AMS-01 | — | Runs the n8n workflow. Detects fail-open DNS edges and disables that edge's VIP route approval through the Tailscale API. See [Appendix E](#appendix-e-external-route-remediation-via-n8n). |
 | **Not involved** | k3s Rack A/B/C | AMS-01 | — | DNS must not depend on k3s availability. |
 | **Not involved** | All wake-on-demand machines | AMS-01 | — | Never advertise the VIP from machines that sleep or reboot casually. |
-| **Not a DNS edge** | Mac Studio | AMS-01 | — | Sync daemon role only. Too many critical services to also be a DNS edge; macOS loopback VIP binding is more complex. |
+| **Not a DNS edge** | Mac Studio | AMS-01 | — | Sync/fencing controller role only. Too many critical services to also be a DNS edge; macOS loopback VIP binding is more complex. |
 
 ---
 
@@ -277,20 +323,26 @@ Phase 2 path (optional, future):
 | Failure | Detection | Effect |
 |---|---|---|
 | One regional AGH backend goes down | dnsdist health check (~1s) | Routes to next healthy backend in the same region. No client impact. |
-| All AGH backends in a region go down | dns-ha-agent probe failure (~4s) | Agent withdraws 10.253.53.53/32 on that node. Tailscale routes clients to next available edge (~15s), which serves from its own regional pool. Filtering remains active. |
-| dnsdist crashes on an edge node | dns-ha-agent probe failure (~4s) | Agent withdraws the route. Tailscale fails over to next edge (~15s). ~19s max disruption. |
-| dns-ha-agent crashes (non-zero exit) | Docker `restart: unless-stopped` (immediate) | Container restarts. Brief window (~6s) before STARTING → HEALTHY re-advertises. If the underlying node is also broken, Tailscale node-level failover handles it. |
-| dns-ha-agent hangs | Internal liveness check → self-exit (~15s) | Agent's internal watchdog detects deadlock/hang and forces non-zero exit. Docker `restart: unless-stopped` then restarts the container. Same recovery path as crash case. Note: Docker `HEALTHCHECK` alone does NOT auto-restart in Compose; the recovery mechanism is the self-exit + restart policy. |
-| dns-ha-agent on a node loses peer reachability | Peer monitor (60s threshold) | Partition detection: if 2+ peers report this node unreachable, agent self-withdraws. Prevents split-brain advertising. |
-| dns-ams-01 goes down (AMS tinkering, power, hardware) | Tailscale node disconnects (~15s) | Tailscale fails over to dns-iom-01. EU DNS continues uninterrupted from IOM's pool. AMS LAN Pi-hole also down — AMS LAN clients lose DNS until node recovers. |
+| All AGH backends in a region go down; agent can mutate Tailscale | dns-ha-agent probe failure (~4s) | Agent withdraws `10.253.53.53/32` on that node. Tailscale routes clients to next available edge (~15s), which serves from its own regional pool. Filtering remains active. |
+| dnsdist crashes on an edge; agent can mutate Tailscale | dns-ha-agent probe failure (~4s) | Agent withdraws the route. Tailscale fails over to next edge (~15s). ~19s max disruption. |
+| Edge DNS stack unhealthy but agent cannot withdraw (Tailscale socket gone, CLI persistently failing, etc.) | `dns_ha_agent_fail_open=1`, external per-edge DNS probe failure, Tailscale API still shows route enabled | n8n quorum-fencing workflow disables that node's `10.253.53.53/32` route approval via Tailscale API. Clients converge to another edge. This is the key fail-open remediation path. |
+| Agent dead/unreachable while node still advertises route | n8n cannot scrape `/health`/`/metrics`; external per-edge DNS probe fails; Tailscale API still shows route enabled | n8n may fence the node if the failure persists and at least one other edge is healthy. This covers the case where the agent cannot self-report `fail_open`. |
+| dns-ha-agent crashes (non-zero exit) | Docker `restart: unless-stopped` (immediate) | Container restarts. Brief window (~6s) before STARTING → HEALTHY re-advertises. If the underlying DNS stack is broken, startup reconciliation withdraws first; if reconciliation itself fails, n8n can remediate via fail-open fencing. |
+| dns-ha-agent hangs | Internal liveness check → self-exit (~15s) | Agent's internal watchdog detects deadlock/hang and forces non-zero exit. Docker `restart: unless-stopped` then restarts the container. Note: Docker `HEALTHCHECK` alone does NOT auto-restart in Compose; the recovery mechanism is the self-exit + restart policy. |
+| dns-ha-agent on a node loses peer reachability | Peer monitor (60s threshold) | Partition detection: if 2+ peers report this node unreachable, agent self-withdraws. Full isolation where the node cannot read peer reports is not treated as quorum by the agent; n8n external checks cover persistent fail-open cases. |
+| n8n host / Mac Studio down | n8n workflow health check / missing scheduled executions | Normal Tailscale node-level failover and dns-ha-agent self-withdraw still work. External fail-open route fencing is unavailable until n8n returns. DNS continues unless an edge enters fail-open during this window. |
+| n8n Tailscale API token revoked/expired | n8n API call failure | n8n can still detect and alert on fail-open states, but cannot fence. Operator must remediate manually. |
+| n8n false-positive fencing | n8n audit log + route disabled unexpectedly | A healthy edge may be disabled. Guardrails: repeated checks, quorum corroboration, never fence the last healthy edge, disable only one edge per run unless explicitly allowed, and manual re-enable. |
+| Tailscale autoApprover re-enables a fenced route | n8n sees route enabled again after fencing | Treat as failed fencing. Either keep fenced state active until manual clearance or move to a two-tag model where only `tag:dns-edge-active` auto-approves the VIP route. |
+| dns-ams-01 goes down (AMS tinkering, power, hardware) | Tailscale node disconnects (~15s) | Tailscale fails over to dns-iom-01. EU DNS continues from IOM's pool. AMS LAN Pi-hole also down — AMS LAN clients lose DNS until node recovers. |
 | dns-iom-01 goes down | Tailscale node disconnects (~15s) | EU DNS continues on dns-ams-01. No tailnet impact. |
-| AMS total power outage (dns-ams-01 + agh-ams-01 down) | Tailscale node disconnects | dns-iom-01 takes over EU. Its pool falls back to agh-iom-01 only (agh-ams-01 is also down). EU DNS continues, single AGH backend. |
-| dns-tor-01 goes down (sole NA edge) | Tailscale node disconnects (~15s) | Tailscale routes NA clients to nearest remaining edge (most likely EU). NA LAN Pi-hole down until node recovers. |
-| dns-shz-01 goes down (sole APAC edge) | Tailscale node disconnects (~15s) | Tailscale routes APAC clients to EU. APAC LAN Pi-hole down until node recovers. |
+| AMS total power outage (dns-ams-01 + agh-ams-01 + Mac Studio down) | Tailscale node disconnects; n8n unavailable | dns-iom-01 takes over EU. Its pool falls back to agh-iom-01 only. EU DNS continues, but external route fencing is unavailable until Mac Studio power returns. |
+| dns-tor-01 goes down (sole NA edge) | Tailscale node disconnects (~15s) | Tailscale routes NA clients to an available remaining edge. NA LAN Pi-hole down until node recovers. |
+| dns-shz-01 goes down (sole APAC edge) | Tailscale node disconnects (~15s) | Tailscale routes APAC clients to an available remaining edge. APAC LAN Pi-hole down until node recovers. |
 | All EU edges down simultaneously | Tailscale node disconnects | Tailscale clients route to NA or APAC. HA DNS continues. EU LAN Pi-holes down until power/nodes recover. |
 | All edge nodes down simultaneously | None | HA DNS broken for all tailnet clients. Each LAN's Pi-hole continues working independently. |
 | AGH config drifts between regions | adguardhome-sync corrects within 5 minutes | No functional impact within the sync window. |
-| Mac Studio goes down | None | adguardhome-sync pauses globally. DNS continues normally. Config changes must be made manually on each AGH instance until Mac Studio recovers. |
+| Mac Studio goes down | n8n/adguardhome-sync unavailable | adguardhome-sync pauses and n8n route fencing is unavailable. DNS continues via existing edge nodes and self-withdraw logic. Config changes must be made manually on each AGH instance until Mac Studio recovers. |
 | k3s cluster goes down | k3s events | No DNS impact. DNS does not depend on k3s. |
 | Pi-hole goes down on any node | None (independent system) | That LAN's local DNS broken until Pi-hole recovers. HA tailnet DNS unaffected. |
 
@@ -345,7 +397,7 @@ Nodes that are AGH backends only (`dns-tor-02`, `dns-hou-01`) run Pi-hole, Unbou
 
 **NextDNS as filtering-aware fallback** — a managed cloud resolver with matching blocklists as a last-resort backend so filtering still applies if all local nodes are down; introduces a privacy trade-off.
 
-**Tailscale API controller** — a daemon that dynamically rewrites the Tailscale nameserver list based on health checks; valid as a secondary remediation layer but too slow and fragile to be the primary failover mechanism.
+**Tailscale API nameserver controller** — a daemon that dynamically rewrites the Tailscale nameserver list based on health checks. Rejected as the primary failover mechanism because it is broader, slower, and more fragile than subnet-router failover. This is distinct from **Tailscale API route fencing**, which is adopted as a targeted secondary remediation layer via n8n: it disables one bad node's approved `10.253.53.53/32` route without changing the global nameserver setting. See [Appendix E](#appendix-e-external-route-remediation-via-n8n).
 
 **Monit + shell action script** — host-level monitor running probes and triggering shell-script route mutation. Considered and rejected in favour of `dns-ha-agent` because Monit doesn't fit the homelab's container-and-ansible deployment pattern, and an external monitoring tool would couple the HA layer to other services.
 
@@ -541,6 +593,7 @@ Health-driven route mutation is handled by `dns-ha-agent`, a containerised Java 
 5. On startup, the agent reconciles actual Tailscale route state — explicitly withdrawing the VIP if a previous instance crashed without graceful shutdown — then waits for 3 consecutive successful local probes before re-advertising. On SIGTERM, it withdraws the route gracefully before exit.
 6. The agent has an internal `WatchdogThread` that forces `System.exit(70)` on probe-loop deadlock. Docker `restart: unless-stopped` then restarts the container. This is the recovery path — `HEALTHCHECK` alone does NOT auto-restart in Compose.
 7. Rollback is byte-identical: change `dns_ha_agent_image_digest` in ansible back to a previous known-good digest, re-run the playbook. The previous artifact remains in the registry (retention: last 20 digests).
+8. The agent exports `dns_ha_agent_fail_open` and `dns_ha_agent_fail_open_duration_seconds`. n8n consumes these metrics as one input to external route fencing, but it also performs external DNS checks so a dead agent cannot hide a stale route. See [Appendix E](#appendix-e-external-route-remediation-via-n8n).
 
 ---
 
@@ -578,6 +631,93 @@ curl http://DNS_AMS_TS_IP:8091/metrics        # Prometheus metrics
 
 ---
 
+## Appendix E: External Route Remediation via n8n
+
+The n8n workflow is the external safety layer for zombie DNS edges: nodes that are unhealthy but still have the VIP route approved/enabled. It is intentionally slower and more conservative than `dns-ha-agent` self-withdraw.
+
+### Runtime location
+
+- **Host**: Mac Studio at AMS-01.
+- **Role**: control-plane helper only; not a DNS edge and does not advertise `10.253.53.53/32`.
+- **Inputs**: edge `/health`, edge `/metrics`, direct per-edge DNS probes, and Tailscale route state from the API.
+- **Output**: disable the bad edge's approved `10.253.53.53/32` route via the Tailscale API, then alert.
+
+### Required n8n secrets
+
+Store these as n8n credentials/environment variables, not in workflow JSON:
+
+```text
+TAILSCALE_TAILNET=<tailnet name or ID>
+TAILSCALE_API_TOKEN=<restricted token capable of reading devices/routes and disabling route approval>
+DNS_EDGE_INVENTORY=<static JSON or file-backed list of edge names, TS IPs, route IDs>
+```
+
+Prefer a token with the narrowest available scope. Rotate it deliberately, and alert on API authentication failures.
+
+### Per-edge evidence collection
+
+For each edge:
+
+```bash
+curl -fsS http://<EDGE_TS_IP>:8091/health
+curl -fsS http://<EDGE_TS_IP>:8091/metrics
+
+dig @<EDGE_TS_IP> -p 5353 cloudflare.com +short
+dig @<EDGE_TS_IP> -p 5353 test.blocked.internal +short
+```
+
+The `:5353` probe checks AGH + Unbound directly. If you later add a dnsdist diagnostic listener on `<EDGE_TS_IP>:1053`, switch the n8n probe to `:1053` so it tests the full dnsdist → AGH → Unbound path.
+
+### Fencing decision
+
+Fence only when the evidence points to a real fail-open condition:
+
+```text
+route_enabled_for_edge == true
+AND edge_externally_unhealthy == true
+AND (
+  dns_ha_agent_fail_open == 1
+  OR agent_unreachable_for > 60s
+  OR quorum_peers_report_unhealthy
+)
+AND at_least_one_other_edge_healthy == true
+AND failure_persists_for >= 60s
+```
+
+Guardrails:
+
+- Never fence the last healthy edge.
+- Do not fence more than one edge per workflow run unless explicitly overridden.
+- Require repeated failures, not one missed probe.
+- Alert before and after the fencing API call.
+- Record an audit log containing node, checks, decision, API response, timestamp, and workflow run ID.
+
+### Remediation action
+
+The workflow disables that node's approved route for `10.253.53.53/32` through the Tailscale API. The node may still be locally advertising the route, but clients should stop selecting it once the route is disabled/unapproved centrally.
+
+Re-enable is manual by default:
+
+1. Repair the edge.
+2. Confirm `/health` is `HEALTHY`.
+3. Confirm direct per-edge DNS probes pass.
+4. Confirm no `dns_ha_agent_fail_open` is present.
+5. Re-enable the route approval in Tailscale.
+6. Clear the n8n fenced-state record.
+
+### Auto-approval interaction test
+
+Because `tag:dns-edge` auto-approves `10.253.53.53/32`, explicitly test whether disabling a route via API remains disabled while the node continues advertising. If auto-approval immediately re-enables it, move to a two-tag model:
+
+```text
+tag:dns-edge          — can run edge services and be polled
+tag:dns-edge-active   — auto-approves 10.253.53.53/32
+```
+
+n8n fencing would remove or disable the active approval state; manual repair would restore it.
+
+---
+
 ## Appendix F: Break-Glass and Monitoring
 
 ### Break-Glass Procedures
@@ -598,6 +738,12 @@ docker stop dns-ha-agent                          # agent withdraws on shutdown
 sudo tailscale set --advertise-routes=10.253.53.53/32   # force-advertise
 # Investigate, fix, then:
 docker start dns-ha-agent                         # agent reconciles to its computed state
+
+# Option 4: Re-enable a node fenced by n8n
+# 1. Repair the edge and confirm /health is HEALTHY.
+# 2. Confirm direct DNS probes pass.
+# 3. Re-enable the node's 10.253.53.53/32 route approval in Tailscale.
+# 4. Clear the n8n fenced-state/audit flag so it does not disable the route again.
 ```
 
 ### Monitoring Checklist
@@ -633,6 +779,10 @@ tailscale ping dns-ams-01
 tailscale ping dns-iom-01
 tailscale ping dns-tor-01
 tailscale ping dns-shz-01
+
+# n8n route-fencing workflow health
+# Check last successful scheduled run, last Tailscale API call status,
+# and any fenced-state records awaiting manual review.
 ```
 
 Prometheus scrape config snippet (for whatever Prometheus you run):
@@ -654,7 +804,11 @@ Alerting rules worth setting up (Alertmanager):
 - `dns_ha_agent_state{state="HEALTHY"} == 0` for >5m on any edge → page
 - `dns_ha_agent_vip_advertised == 0` on >1 edge simultaneously → page (degraded HA)
 - `rate(dns_ha_agent_route_mutations_total[5m]) > 0.1` → warn (flapping)
-- `up{job="dns-ha-agent"} == 0` → warn (agent scrape failing)
+- `dns_ha_agent_fail_open == 1` → immediate critical alert and n8n fencing candidate
+- `dns_ha_agent_fail_open_duration_seconds > 60` → page; fail-open has persisted beyond one remediation window
+- `up{job="dns-ha-agent"} == 0` → warn (agent scrape failing); n8n should combine this with external DNS and Tailscale route-state checks
+- n8n scheduled workflow missed/failed for >2 intervals → warn; external fencing unavailable
+- n8n Tailscale API authentication failure → page; fencing can detect but not remediate
 
 ---
 

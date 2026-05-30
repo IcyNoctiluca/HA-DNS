@@ -11,6 +11,8 @@
 
 When healthy, the agent ensures the VIP is advertised. When unhealthy (or partitioned), the agent withdraws the route. It exposes a `/health` endpoint for peer observation and a `/metrics` endpoint for Prometheus.
 
+At the wider system level, an n8n workflow on the Mac Studio may consume this service's fail-open metrics and externally fence a node through the Tailscale API, but that controller is outside the agent process and does not change the agent's local-only mutation boundary. See [`../BLUEPRINT.md`](../BLUEPRINT.md) Appendix E and [§17](#17-external-route-fencing-via-n8n) below for the contract between the agent and n8n.
+
 ---
 
 ## 2. Goals & Non-Goals
@@ -22,11 +24,11 @@ When healthy, the agent ensures the VIP is advertised. When unhealthy (or partit
 - **Declarative**: the only operator-facing surface is the YAML config and the ansible role.
 - **Reproducible**: image is built deterministically in CI; ansible role is idempotent; production pins by image digest.
 - **Observable**: structured JSON logs to stdout, `/health` endpoint for peers, `/metrics` endpoint for Prometheus.
-- **Fail-safe**: agent crashes, hangs, or container restarts default to *withdrawing* the route, never to silently leaving stale advertisements.
+- **Fail-safe within the local lifecycle**: graceful shutdown withdraws immediately; startup reconciliation withdraws stale advertisements before health validation; internal hangs self-exit so Docker restarts the agent. Abrupt `SIGKILL` or host-level Tailscale failures can still leave a stale route until restart or external fencing, which is why fail-open metrics are exported.
 
 ### Non-Goals
 
-- **Cross-node state mutation**: peers never mutate each other's Tailscale state. They observe only.
+- **Cross-node state mutation by the agent**: peers never mutate each other's Tailscale state. They observe only. External n8n route fencing is a system-level remediation layer, not an agent responsibility.
 - **Consensus protocol**: no Raft, no Paxos, no leader election. Each agent decides for itself based on its own observations.
 - **DNS filtering**: that's AGH's job. The agent only *checks* that filtering is working.
 - **DNS resolution**: that's dnsdist/AGH/Unbound's job.
@@ -199,6 +201,10 @@ split_brain:
 
 # Tailscale interaction.
 tailscale:
+  # Production mode is `cli`. `noop` is test-only and requires
+  # DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true or --allow-noop-tailscale.
+  # Without that env/flag, starting the agent in noop mode is a fatal error.
+  mode: cli
   # Path to tailscale CLI in the container (baked into image).
   cli_path: /usr/bin/tailscale
   # Additional routes to always preserve when mutating advertise list.
@@ -245,6 +251,9 @@ Peer-facing endpoint. Returns the agent's current self-assessment and view of it
   "region": "eu",
   "state": "HEALTHY",
   "vip_advertised": true,
+  "desired_vip_advertised": true,
+  "fail_open": false,
+  "force_withdraw_active": false,
   "local_probe": {
     "last_probe_ts": "2026-05-23T14:33:21Z",
     "last_result": "HEALTHY",
@@ -321,8 +330,18 @@ dns_ha_agent_route_mutations_total{action="withdraw",result="success"} 13
 # TYPE dns_ha_agent_last_route_mutation_ts gauge
 dns_ha_agent_last_route_mutation_ts 1.768139601e+09
 
+# HELP dns_ha_agent_fail_open 1 when desired=WITHDRAW but VIP is still advertised (fail-open condition)
+# TYPE dns_ha_agent_fail_open gauge
+dns_ha_agent_fail_open 0
+
+# HELP dns_ha_agent_fail_open_duration_seconds Seconds the fail-open condition has been continuously active (0 if not active)
+# TYPE dns_ha_agent_fail_open_duration_seconds gauge
+dns_ha_agent_fail_open_duration_seconds 0
+
 # Standard JVM metrics (heap, GC, threads) — auto-exported by simpleclient_hotspot.
 ```
+
+`dns_ha_agent_fail_open == 1` is the core invariant alert: the agent's effective decision is `WITHDRAW` but the VIP advertisement is still present (e.g., the CLI mutation failed, the Tailscale socket is unreachable, or the host's `tailscaled` is wedged). Alert immediately — this is the most dangerous failure class. The `_duration_seconds` gauge drives a time-based alert (e.g., page if sustained for >60s). n8n consumes these metrics as one input to external route fencing, but n8n must also perform independent per-edge DNS probes so a dead agent cannot hide a stale route.
 
 ---
 
@@ -334,6 +353,10 @@ Pure function. Inputs: current `HealthState`, config. Output: `ADVERTISE` or `WI
 function decide(state, config):
     # SHUTTING_DOWN always wins
     if state.fsm == SHUTTING_DOWN:
+        return WITHDRAW
+
+    # Operator force-withdraw file overrides everything else but SHUTTING_DOWN
+    if exists("/var/lib/dns-ha-agent/force-withdraw"):
         return WITHDRAW
 
     # PARTITIONED overrides healthy local probes
@@ -358,6 +381,8 @@ function decide(state, config):
 ```
 
 The FSM transitions are evaluated on every probe cycle. The `Decider` is stateless; state is held in `HealthState`.
+
+After each decision, the route mutation step records `desired_vip_advertised` from the decision and `vip_advertised` from `tailscaleClient.currentlyAdvertised()`. If the effective decision is `WITHDRAW` but the VIP remains in `currentlyAdvertised()` after the mutation attempt, `dns_ha_agent_fail_open` is set to `1` and `dns_ha_agent_fail_open_duration_seconds` starts/continues counting. This is the signal that n8n's external route fencing watches for.
 
 ---
 
@@ -399,13 +424,29 @@ Implementation:
 
 The Docker `HEALTHCHECK` directive remains in the Dockerfile but its role is **diagnostic only** (visible in `docker ps` for operator visibility, scraped by monitoring) — recovery comes from the agent self-exiting + Docker restart policy, not from the healthcheck triggering a restart.
 
+### Operator override: force-withdraw
+
+Placing an empty file at `/var/lib/dns-ha-agent/force-withdraw` forces immediate VIP withdrawal and keeps the agent in that state regardless of probe results. The agent checks for this file each probe cycle. Remove the file to resume normal operation.
+
+```bash
+# Hold a node offline (e.g. while draining for maintenance)
+touch /var/lib/dns-ha-agent/force-withdraw
+# Agent logs: WARN: force-withdraw file present, staying WITHDRAWN
+
+# Resume
+rm /var/lib/dns-ha-agent/force-withdraw
+```
+
+The file persists across container restarts (mounted via the `/var/lib/dns-ha-agent` volume). This is the preferred operator override over a manual `tailscale set` because it works within the agent's control loop — the agent itself stays running, continues logging and responding to `/health` (with `force_withdraw_active: true`), and re-validates as soon as the file is removed. It is also visible and auditable as a filesystem artefact.
+
 ### Error handling
 
 | Condition | Behaviour |
 |---|---|
 | Local probe DNS query times out | Counts as a failure. |
 | Local probe gets a real IP for the blocked name | Counts as a failure (filtering broken). |
-| Tailscale CLI invocation exits non-zero | Log error, retry on next decision cycle. Counter `route_mutations_total{result="failure"}` incremented. |
+| Tailscale CLI/socket unavailable at startup in production `cli` mode | Log fatal error and exit non-zero. A production deployment without a Tailscale mutation path is unsafe — Docker `restart: unless-stopped` will keep retrying, surfacing the misconfiguration. |
+| Tailscale CLI invocation exits non-zero | Log error, retry on next decision cycle. Counter `route_mutations_total{result="failure"}` incremented. If effective decision is WITHDRAW and managed routes remain advertised, set `dns_ha_agent_fail_open=1`. |
 | Tailscale CLI invocation times out | Kill process, log, retry on next cycle. |
 | Peer `/health` returns non-200 or invalid JSON | Mark peer unreachable for this poll cycle. |
 | Peer `/health` times out | Mark peer unreachable for this poll cycle. |
@@ -514,6 +555,15 @@ public interface TailscaleClient {
     void advertiseRoutes(Set<String> routes) throws TailscaleException;
     Set<String> currentlyAdvertised() throws TailscaleException;
 }
+
+// TailscaleConfig — production uses cli; noop is test-only and refused unless
+// DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true or --allow-noop-tailscale is set.
+public record TailscaleConfig(
+    String mode,          // "cli" | "noop"
+    String cliPath,
+    List<String> preservedRoutes,
+    Duration commandTimeout
+) { }
 
 // ProbeLoop — runs in a virtual thread
 public final class ProbeLoop implements Runnable {
@@ -932,6 +982,7 @@ split_brain:
   min_peer_reports_to_self_withdraw: 2
 
 tailscale:
+  mode: cli
   cli_path: /usr/bin/tailscale
   preserved_routes: []
   command_timeout: 10s
@@ -992,7 +1043,15 @@ dns_ha_agent_peers:
 
 ### Break-glass: manual route mutation
 
-If the agent is misbehaving and you need to force the route state:
+**Preferred — force-withdraw file** (no container restart needed): if you need to hold a node offline while investigating, place the override file and the agent will withdraw and stay withdrawn while remaining fully observable:
+
+```bash
+touch /var/lib/dns-ha-agent/force-withdraw   # agent withdraws within one probe cycle (~2s)
+# investigate, fix, then:
+rm    /var/lib/dns-ha-agent/force-withdraw   # agent resumes normal operation
+```
+
+**Nuclear — stop the agent and mutate manually**: if the agent process itself is the problem:
 
 ```bash
 # Stop the agent
@@ -1005,7 +1064,7 @@ sudo tailscale set --advertise-routes=10.253.53.53/32
 docker start dns-ha-agent
 ```
 
-The agent does not fight you: on startup it goes through STARTING → HEALTHY normally based on its own probes.
+The agent does not fight you: on startup it goes through STARTING → HEALTHY normally based on its own probes. Any force-withdraw file left in place will keep it withdrawn until you remove it.
 
 ### Rolling out a new agent version
 
@@ -1055,14 +1114,60 @@ docker compose -f /etc/dns-ha-agent/docker-compose.yml up -d
 
 ---
 
-## 16. Future Considerations & Open Questions
+## 17. External Route Fencing via n8n
+
+`dns-ha-agent` remains deliberately local-only: it mutates only its own host's Tailscale route advertisement. The wider HA DNS system adds a second remediation layer outside this service: an n8n workflow on the always-on Mac Studio can fence a bad edge by disabling that node's approved `10.253.53.53/32` route through the Tailscale API.
+
+This section documents the contract between the agent and that external controller. The agent does not call n8n and n8n does not change the agent's local state. n8n consumes the agent's telemetry plus external checks. Full operational detail (Tailscale API secrets, fencing decision guardrails, audit log, autoApprover interaction test) lives in [`../BLUEPRINT.md`](../BLUEPRINT.md) Appendix E.
+
+### Signals exported for n8n
+
+- `/health`: current FSM state, `vip_advertised`, `desired_vip_advertised`, `fail_open`, `force_withdraw_active`, probe counters, peer observations, and uptime.
+- `/metrics`: `dns_ha_agent_fail_open`, `dns_ha_agent_fail_open_duration_seconds`, route mutation counters, probe counters, and peer reachability gauges.
+- Logs: route mutation failures and startup stale-route reconciliation events.
+
+### n8n remediation logic (summary)
+
+n8n must not depend solely on `dns_ha_agent_fail_open`, because a dead agent cannot report that it is fail-open. The external controller combines agent telemetry with independent per-edge probes and Tailscale route state:
+
+```text
+for each edge every 30s:
+  health    = GET http://<edge-ts-ip>:8091/health  # may fail
+  metrics   = GET http://<edge-ts-ip>:8091/metrics # may fail
+  dns_check = dig @<edge-ts-ip> -p 5353 cloudflare.com
+  block_chk = dig @<edge-ts-ip> -p 5353 test.blocked.internal
+  route     = tailscale_api route state for edge + 10.253.53.53/32
+
+  if route.enabled
+     and external DNS/filtering check is unhealthy
+     and (fail_open(metrics) == 1
+          or agent unreachable for >60s
+          or quorum peers report edge unhealthy)
+     and at least one other edge is healthy:
+       disable that edge's route approval via Tailscale API
+       alert + write audit log
+```
+
+Re-enable is manual by default. The operator repairs the edge, verifies `/health` and direct DNS probes, then re-enables the route approval and clears n8n's fenced-state record.
+
+### Agent-side responsibilities
+
+The agent must make fail-open states visible and machine-readable, but it must not attempt to coordinate remote fencing:
+
+- Maintain accurate `desired_vip_advertised` and `vip_advertised` state.
+- Set `dns_ha_agent_fail_open=1` when `desired_vip_advertised=false` but any managed route remains advertised after the mutation attempt.
+- Keep `/health` available while `force-withdraw` is active.
+- Avoid hidden side effects that would fight n8n's fenced state. If n8n disables central route approval, the agent may continue to advertise locally once healthy; central approval/re-enable remains an operator/n8n concern.
+
+---
+
+## 18. Future Considerations & Open Questions
 
 To be resolved during or after v1.0:
 
 - **GraalVM native-image build** — would cut container size to ~50MB and improve cold start. Reconsider if image pull time becomes a deployment friction.
 - **Tailscale LocalAPI integration** — replace CLI subprocess with direct HTTP-over-unix-socket calls. More robust error handling, no CLI dep in image. Reconsider if subprocess error handling becomes a pain.
 - **Hot config reload** — watch config file with `WatchService`, atomically swap. Complex; revisit if restart-induced downtime ever matters (it doesn't currently because graceful shutdown withdraws cleanly).
-- **Quorum-based peer auto-withdrawal** — peers SSH to a broken node and withdraw its route. Adds attack surface; only consider if "wait for human" response time becomes the dominant outage component.
 - **Multi-VIP support** — manage multiple VIPs from one agent (e.g., for separate internal-only DNS or service VIPs). Trivial extension; not needed v1.
 - **IPv6 support** — when the rest of the HA DNS design grows IPv6, agent grows it too.
 - **A proper staging tailnet** — CI tests run against real Tailscale for the mutation path, not just mocks. Would catch CLI version drift, etc.
