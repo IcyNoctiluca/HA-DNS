@@ -196,6 +196,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - [ ] Multi-arch image (`amd64`, `arm64`) published to `forgejo.homelab.internal/homelab/dns-ha-agent`; digest captured as CI build output.
 - [ ] Ansible role asserts digest is set; refuses to deploy without one.
 - [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
+- [ ] **Tailscale socket reachable from container**: after the container starts, `docker exec dns-ha-agent tailscale status` succeeds (proves the LocalAPI socket bind mount works). The compose file must explicitly mount `/var/run/tailscale/tailscaled.sock` — host networking alone does not expose it.
 - [ ] Agent transitions STARTING → HEALTHY within 10s of container start.
 - [ ] **Startup reconciliation**: if the VIP is already advertised when the agent starts (simulate by manually `tailscale set --advertise-routes=10.253.53.53/32` before starting the agent), the agent withdraws it at startup and re-advertises only after passing local probes.
 - [ ] `/health` returns valid JSON matching the schema in `BLUEPRINT.md` §6 — including `desired_vip_advertised`, `fail_open`, and `force_withdraw_active` fields.
@@ -208,6 +209,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - [ ] **Idempotent route mutation**: calling `TailscaleClient.advertiseRoutes()` twice with the same input is a no-op the second time; calling with a different input produces the expected mutation.
 - [ ] **Preserved-routes handling**: a non-DNS route added externally to `preserved_routes` config is never wiped by the agent's withdraw operation.
 - [ ] Inducing a filter break (stop AGH on dns-ams-01) causes the agent to withdraw within `(fail_threshold × interval) + tailscale convergence` ≈ 4s + 15s.
+- [ ] **Per-backend filter probe**: configure a backup backend with a broken filter (e.g., temporarily remove the sentinel block rule on `agh-iom-01` only). Within one backend-probe interval, `dns_ha_agent_backend_filter_ok{backend="agh-iom-01"} == 0` and `/health` flags `filter_ok: false` for that backend, but the edge stays HEALTHY and continues advertising the VIP (the active backend is still good). Restoring the block rule restores the metric to 1 within one interval.
 - [ ] Recovery after re-starting AGH: agent re-advertises within `success_threshold × interval` ≈ 6s.
 - [ ] Two agents probing each other correctly detect partition when network-partitioned in a test.
 - [ ] **Digest rollback** demonstrated: deploy digest A, deploy digest B, change ansible var back to A, redeploy, confirm image hash matches A exactly.

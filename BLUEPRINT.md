@@ -323,6 +323,7 @@ Phase 2 path (optional, future):
 | Failure | Detection | Effect |
 |---|---|---|
 | One regional AGH backend goes down | dnsdist health check (~1s) | Routes to next healthy backend in the same region. No client impact. |
+| Backup regional AGH backend has broken filtering (silently serving real IPs for blocked names) | dns-ha-agent per-backend filter probe (`dns_ha_agent_backend_filter_ok{backend=...} == 0`) | Edge stays HEALTHY (active backend is fine); operator alerted via Prometheus. If dnsdist fails over to the broken backend, the agent's *local* probe then fails and Layer 1 self-withdraw kicks in. Goal of this metric is to catch the latent breakage before failover lands traffic on it. |
 | All AGH backends in a region go down; agent can mutate Tailscale | dns-ha-agent probe failure (~4s) | Agent withdraws `10.253.53.53/32` on that node. Tailscale routes clients to next available edge (~15s), which serves from its own regional pool. Filtering remains active. |
 | dnsdist crashes on an edge; agent can mutate Tailscale | dns-ha-agent probe failure (~4s) | Agent withdraws the route. Tailscale fails over to next edge (~15s). ~19s max disruption. |
 | Edge DNS stack unhealthy but agent cannot withdraw (Tailscale socket gone, CLI persistently failing, etc.) | `dns_ha_agent_fail_open=1`, external per-edge DNS probe failure, Tailscale API still shows route enabled | n8n quorum-fencing workflow disables that node's `10.253.53.53/32` route approval via Tailscale API. Clients converge to another edge. This is the key fail-open remediation path. |
@@ -613,7 +614,7 @@ Verify from macOS:
 ```bash
 tailscale dns status                            # confirm 10.253.53.53 is the resolver
 dig @10.253.53.53 cloudflare.com               # should resolve
-dig @10.253.53.53 test.blocked.internal        # should return NXDOMAIN (custom AGH block entry)
+dig @10.253.53.53 dns-filter-sentinel.<your-public-domain>        # should return NXDOMAIN (custom AGH block entry)
 ```
 
 Verify each edge node directly:
@@ -663,7 +664,7 @@ curl -fsS http://<EDGE_TS_IP>:8091/health
 curl -fsS http://<EDGE_TS_IP>:8091/metrics
 
 dig @<EDGE_TS_IP> -p 5353 cloudflare.com +short
-dig @<EDGE_TS_IP> -p 5353 test.blocked.internal +short
+dig @<EDGE_TS_IP> -p 5353 dns-filter-sentinel.<your-public-domain> +short
 ```
 
 The `:5353` probe checks AGH + Unbound directly. If you later add a dnsdist diagnostic listener on `<EDGE_TS_IP>:1053`, switch the n8n probe to `:1053` so it tests the full dnsdist → AGH → Unbound path.
@@ -755,7 +756,7 @@ Run these periodically or wire into a monitoring tool (e.g. Uptime Kuma, Prometh
 dig @10.253.53.53 cloudflare.com +short
 
 # Filtering health (should return NXDOMAIN or empty)
-dig @10.253.53.53 test.blocked.internal +short
+dig @10.253.53.53 dns-filter-sentinel.<your-public-domain> +short
 
 # dns-ha-agent self-view + peer-view
 curl -s http://DNS_AMS_TS_IP:8091/health | jq
@@ -804,6 +805,8 @@ Alerting rules worth setting up (Alertmanager):
 - `dns_ha_agent_state{state="HEALTHY"} == 0` for >5m on any edge → page
 - `dns_ha_agent_vip_advertised == 0` on >1 edge simultaneously → page (degraded HA)
 - `rate(dns_ha_agent_route_mutations_total[5m]) > 0.1` → warn (flapping)
+- `dns_ha_agent_backend_filter_ok == 0` for >2m → page (silent filter breakage on a backup backend, will only hurt after failover)
+- `dns_ha_agent_backend_resolve_ok == 0` for >2m → warn (backup backend resolution down; dnsdist will also flag it)
 - `dns_ha_agent_fail_open == 1` → immediate critical alert and n8n fencing candidate
 - `dns_ha_agent_fail_open_duration_seconds > 60` → page; fail-open has persisted beyond one remediation window
 - `up{job="dns-ha-agent"} == 0` → warn (agent scrape failing); n8n should combine this with external DNS and Tailscale route-state checks
