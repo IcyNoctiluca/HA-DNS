@@ -21,7 +21,7 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 | "What does /health return?" | `BLUEPRINT.md` §API Surface |
 | "I'm starting Phase N" | `PHASES.md` (find phase) |
 | "What's been done already?" | `PROGRESS.md` |
-| "How does this fit into the wider HA DNS?" | `../ha-dns/BLUEPRINT.md` Appendix C |
+| "How does this fit into the wider HA DNS?" | `../BLUEPRINT.md` Appendix C |
 
 ## Coding invariants — never violate
 

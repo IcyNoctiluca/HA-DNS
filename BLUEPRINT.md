@@ -1,6 +1,6 @@
 # HA DNS — Design Blueprint
 
-> Source-of-truth design for the HA DNS layer. For implementation phases and rollout steps, see [`PHASES.md`](PHASES.md). For agent (dns-ha-agent) specifics, see [`../dns-ha-agent/BLUEPRINT.md`](../dns-ha-agent/BLUEPRINT.md).
+> Source-of-truth design for the HA DNS layer. For implementation phases and rollout steps, see [`PHASES.md`](PHASES.md). For agent (dns-ha-agent) specifics, see [`dns-ha-agent/BLUEPRINT.md`](dns-ha-agent/BLUEPRINT.md).
 
 ## Context & Goals
 
@@ -126,7 +126,7 @@ AdGuard Home     — binds on 127.0.0.1:5353 + Tailscale IP:5353; dnsdist backen
 Unbound          — binds on 127.0.0.1:5335; recursive resolver + DNSSEC; used by both Pi-hole and AGH
 dnsdist          — binds on 10.253.53.53:53 (loopback alias); routes to AGH pool
 dns-ha-agent     — containerised Java service; probes local stack + peers, mutates Tailscale route
-                   advertisement on failure. See ../dns-ha-agent/BLUEPRINT.md for full spec.
+                   advertisement on failure. See dns-ha-agent/BLUEPRINT.md for full spec.
 Tailscale        — --accept-dns=false; tagged tag:dns-edge for auto-approved route advertisement
 ```
 
@@ -530,7 +530,7 @@ docker run -d \
 
 ## Appendix C: dns-ha-agent
 
-Health-driven route mutation is handled by `dns-ha-agent`, a containerised Java service deployed to every edge node. Full specification, including state machine, config schema, API surface, implementation guidance, testing strategy, and CI/CD pipeline, is documented in [`../dns-ha-agent/BLUEPRINT.md`](../dns-ha-agent/BLUEPRINT.md).
+Health-driven route mutation is handled by `dns-ha-agent`, a containerised Java service deployed to every edge node. Full specification, including state machine, config schema, API surface, implementation guidance, testing strategy, and CI/CD pipeline, is documented in [`dns-ha-agent/BLUEPRINT.md`](dns-ha-agent/BLUEPRINT.md).
 
 **Deployment summary** (the operational hook for this document):
 

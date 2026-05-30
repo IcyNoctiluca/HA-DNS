@@ -17,7 +17,7 @@ Read this before making any changes to the HA DNS design or rollout. These are i
 | "I need to add a new edge node" | `BLUEPRINT.md` §Adding Future AZ Nodes |
 | "Something broke, how do I recover?" | `BLUEPRINT.md` §Appendix F (Break-Glass) |
 | "I want to change AGH config" | `BLUEPRINT.md` §AdGuard Home Backend Pool (always change on dns-ams-01; let adguardhome-sync propagate) |
-| "I need to debug the agent" | `../dns-ha-agent/AGENTS.md` |
+| "I need to debug the agent" | `dns-ha-agent/AGENTS.md` |
 
 ## Invariants — never violate
 

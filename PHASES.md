@@ -16,7 +16,7 @@
 | 8 | Production cutover (point Tailscale DNS at VIP) | Phase 7 acceptance passed |
 | 9 | Technitium evaluation (parallel, optional) | Phase 8 stable for ≥2 weeks |
 
-Note: The `dns-ha-agent` service has its own implementation phases in [`../dns-ha-agent/PHASES.md`](../dns-ha-agent/PHASES.md). Phase 1 below assumes the agent is already built and an image digest is available.
+Note: The `dns-ha-agent` service has its own implementation phases in [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md). Phase 1 below assumes the agent is already built and an image digest is available.
 
 ---
 
@@ -346,7 +346,7 @@ Do not advance to this phase until Phases 1–7 all show green acceptance criter
 - All edges report HEALTHY in `/health`.
 - All edges advertise the VIP and routes are auto-approved.
 - Test 6a/b/c/d all passed.
-- dns-ha-agent acceptance criteria in `../dns-ha-agent/PHASES.md` all passed.
+- dns-ha-agent acceptance criteria in `dns-ha-agent/PHASES.md` all passed.
 
 ### Steps
 

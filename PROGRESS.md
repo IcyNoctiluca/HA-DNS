@@ -8,7 +8,7 @@
 
 **Current phase**: Pre-Phase 1 (design complete, awaiting dns-ha-agent v1.0)
 
-**Blockers**: `dns-ha-agent` is unimplemented. See [`../dns-ha-agent/PHASES.md`](../dns-ha-agent/PHASES.md).
+**Blockers**: `dns-ha-agent` is unimplemented. See [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md).
 
 ---
 

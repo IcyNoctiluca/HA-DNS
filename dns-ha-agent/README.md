@@ -12,7 +12,7 @@ The acceptance criteria for v1.0 are defined as the last phase in [`PHASES.md`](
 
 ## Role in the larger system
 
-This service is one component of the homelab HA DNS design. For the wider context — why the VIP exists, what fails closed means, how dnsdist / AGH / Unbound fit together — see [`../ha-dns/`](../ha-dns/).
+This service is one component of the homelab HA DNS design. For the wider context — why the VIP exists, what fails closed means, how dnsdist / AGH / Unbound fit together — see [`../README.md`](../README.md).
 
 Concretely, the agent is the **sole authority** for mutating Tailscale route advertisements of the HA VIP (`10.253.53.53/32`). Without it, the route would either stay advertised by dead nodes (causing client-visible DNS outages) or require manual intervention on every failure.
 
