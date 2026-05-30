@@ -6,7 +6,8 @@
 
 | # | Phase | Prerequisites |
 |---|---|---|
-| 1 | Bootstrap first edge (`dns-ams-01`) | `dns-ha-agent` v1.0 built and digest known |
+| 0 | Prerequisites (filter sentinel domain) | A domain you can publish A records on |
+| 1 | Bootstrap first edge (`dns-ams-01`) | Phase 0 complete; `dns-ha-agent` v1.0 built and digest known |
 | 2 | Bootstrap second EU edge (`dns-iom-01`) | Phase 1 acceptance passed |
 | 3 | Bootstrap NA edge (`dns-tor-01`) | Phase 2 acceptance passed |
 | 4 | Add NA AGH backend (`dns-tor-02`) | Phase 3 acceptance passed |
@@ -17,6 +18,35 @@
 | 9 | Technitium evaluation (parallel, optional) | Phase 8 stable for ≥2 weeks |
 
 Note: The `dns-ha-agent` service has its own implementation phases in [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md). Phase 1 below assumes the agent is already built and an image digest is available.
+
+---
+
+## Phase 0 — Prerequisites
+
+These must be in place before Phase 1 starts.
+
+### Filter sentinel domain
+
+The agent's local probe and several rollout/monitoring checks rely on a **filter sentinel** — a domain that resolves publicly in normal DNS but is explicitly blocked by AGH. Using a made-up internal name (e.g., `test.blocked.internal`) is unsafe because Unbound returns NXDOMAIN for it whether AGH is in the path or not, so a filter bypass looks identical to a working filter.
+
+1. Pick a subdomain of a domain you control (e.g., `dns-filter-sentinel.<your-public-domain>`).
+2. Create a real public A record for it (any routable IP works — a 192.0.2.x TEST-NET-1 address, or your own homelab IP, as long as it's NOT `0.0.0.0` and would actually resolve if AGH were bypassed).
+3. On the primary AGH instance (`dns-ams-01`), add a custom block rule for that exact name. adguardhome-sync will propagate the rule to all replicas.
+4. Verify the asymmetry from any machine before continuing:
+   ```bash
+   dig @1.1.1.1 dns-filter-sentinel.<your-public-domain> +short
+   # Expected: the public A record value (or your chosen routable IP)
+
+   dig @<AGH_AMS_TS_IP> -p 5353 dns-filter-sentinel.<your-public-domain> +short
+   # Expected: empty (blocked by AGH)
+   ```
+5. Record the sentinel name in `dns_ha_agent_filter_sentinel` (Ansible group var) so the agent config, dnsdist filter probes, and monitoring scripts all reference the same value.
+
+Acceptance:
+
+- [ ] Sentinel domain resolves publicly via `1.1.1.1` to the configured A record.
+- [ ] Sentinel domain returns empty/NXDOMAIN via `AGH_AMS:5353`.
+- [ ] adguardhome-sync has propagated the rule to all replicas (`agh-iom-01`, `agh-tor-01`, etc.) — verified by repeating the AGH probe against each replica.
 
 ---
 
@@ -77,6 +107,17 @@ sudo ufw allow from <MAC_STUDIO_TS_IP> to any port 3000 proto tcp
 sudo ufw allow from <ADMIN_LAPTOP_TS_IP> to any port 3000 proto tcp
 sudo ufw allow from 127.0.0.1 to any port 3000 proto tcp
 sudo ufw deny to any port 3000 proto tcp
+
+# 4c. Firewall: dns-ha-agent /health + /metrics port 8091 — Tailscale only.
+#     Defence-in-depth alongside the agent binding to the Tailscale IP.
+#     Tailscale ACLs do NOT protect LAN-side traffic, so this UFW rule is
+#     what stops a host on the same LAN from scraping the agent.
+for EDGE in <AMS01_TS_IP> <IOM01_TS_IP> <TOR01_TS_IP> <SHZ01_TS_IP>; do
+  sudo ufw allow from $EDGE to any port 8091 proto tcp
+done
+sudo ufw allow from <MAC_STUDIO_TS_IP> to any port 8091 proto tcp   # n8n fencer + Prometheus
+sudo ufw allow from 127.0.0.1 to any port 8091 proto tcp
+sudo ufw deny to any port 8091 proto tcp
 sudo ufw reload
 
 # 5. Install dnsdist
@@ -95,7 +136,7 @@ sudo systemctl enable --now dns-vip-bind
 sudo systemctl enable --now dnsdist
 dig @10.253.53.53 cloudflare.com +short
 # Expected: a real A record.
-dig @10.253.53.53 test.blocked.internal +short
+dig @10.253.53.53 dns-filter-sentinel.<your-public-domain> +short
 # Expected: empty (filtered).
 
 # 8. Tag the node in Tailscale admin (do NOT manually advertise VIP — agent does it).
@@ -141,7 +182,7 @@ docker restart dns-ha-agent                # agent re-advertises; auto-approves 
 
 - [ ] `sudo ss -tulpen | grep -E ':53|:5353|:5335|:8091|:3000'` shows the expected port layout (Pi-hole on LAN IP only).
 - [ ] `dig @127.0.0.1 -p 5353 cloudflare.com` returns an A record (local AGH works).
-- [ ] `dig @127.0.0.1 -p 5353 test.blocked.internal` returns empty (filtering works).
+- [ ] `dig @127.0.0.1 -p 5353 dns-filter-sentinel.<your-public-domain>` returns empty (filtering works).
 - [ ] `dig @127.0.0.1 -p 5335 cloudflare.com +trace` shows the full recursive chain (Unbound is recursing, not forwarding).
 - [ ] `dig @10.253.53.53 cloudflare.com` resolves via dnsdist (full path works).
 - [ ] `dig +dnssec +bufsize=1232 @10.253.53.53 cloudflare.com` returns an answer (no UDP truncation).
@@ -149,6 +190,7 @@ docker restart dns-ha-agent                # agent re-advertises; auto-approves 
 - [ ] `curl http://AMS01_TS_IP:8091/health | jq '.vip_advertised'` returns `true`.
 - [ ] `tailscale status` on dns-ams-01 shows `10.253.53.53/32` advertised and approved.
 - [ ] AGH admin port `:3000` is NOT reachable from a non-admin tailnet client.
+- [ ] Agent `:8091` is NOT reachable from a LAN-only host (try `curl http://<LAN_IP_OF_EDGE>:8091/health` from a LAN device with no Tailscale — should fail). Belt and braces: the agent should be bound to the Tailscale IP, not 0.0.0.0, AND blocked from LAN by UFW.
 
 ---
 
@@ -236,17 +278,20 @@ docker restart dns-ha-agent                # agent re-advertises; auto-approves 
 
 **Goal**: prove the failure matrix in `BLUEPRINT.md` is actually correct before any client traffic touches the VIP.
 
-### Test 6a — AGH backend failover
+### Test 6a-i — single AGH backend failure (edge stays HEALTHY)
+
+The agent probes the local VIP (`10.253.53.53`), which goes through dnsdist → first healthy AGH backend in the regional pool. As long as *any* regional AGH backend is healthy, the edge is still useful: dnsdist transparently fails over and the agent's probes continue to succeed. The agent must NOT withdraw the route in this case — withdrawing would be premature and would lose a healthy edge.
 
 ```bash
 ssh dns-ams-01
-sudo systemctl stop adguardhome
+sudo systemctl stop adguardhome   # local AGH only; agh-iom-01 still up
 ```
 
-- [ ] dnsdist on dns-ams-01 fails over to dns-iom-01 backend within ~1s (dnsdist health-check interval).
-- [ ] dns-ha-agent on dns-ams-01 transitions to UNHEALTHY within ~4s.
-- [ ] Agent withdraws route (`tailscale status` no longer shows VIP).
-- [ ] Tailscale fails over to dns-iom-01 within ~15s.
+- [ ] dnsdist on dns-ams-01 fails over to `agh-iom-01` backend within ~1s (dnsdist health-check interval).
+- [ ] `dig @10.253.53.53 cloudflare.com` from a tailnet client continues to resolve.
+- [ ] `dig @10.253.53.53 <FILTER_SENTINEL>` continues to be blocked (filtering still active via remote backend).
+- [ ] dns-ha-agent on dns-ams-01 **stays HEALTHY** (`/health` `state` remains `HEALTHY`, `vip_advertised` remains `true`).
+- [ ] dns-ams-01's `10.253.53.53/32` advertisement remains in `tailscale status`.
 
 Restore:
 
@@ -254,8 +299,34 @@ Restore:
 sudo systemctl start adguardhome
 ```
 
-- [ ] Agent re-advertises within ~6s (3 successful probes).
-- [ ] Route auto-approves.
+- [ ] dnsdist re-pools the local backend within ~1s.
+- [ ] Agent state remains HEALTHY throughout (it never left).
+
+### Test 6a-ii — all regional AGH backends down (edge withdraws)
+
+This is the fail-closed case from the Failure Matrix. With every backend in the edge's regional pool unhealthy, the agent's probe via `10.253.53.53` fails, the agent transitions to UNHEALTHY, and withdraws the route so Tailscale fails over to another region.
+
+```bash
+# Bring down both EU backends simultaneously.
+ssh dns-ams-01 'sudo systemctl stop adguardhome'
+ssh dns-iom-01 'sudo systemctl stop adguardhome'
+```
+
+- [ ] dns-ams-01's dnsdist marks both backends down within ~1s.
+- [ ] dns-ams-01's agent transitions to UNHEALTHY within ~4s (`fail_threshold × interval`).
+- [ ] Agent withdraws route (`tailscale status` no longer shows VIP).
+- [ ] Tailscale routes EU clients to dns-tor-01 (NA) or dns-shz-01 (APAC) within ~15s.
+- [ ] Filtering remains active on the new path (verify with `dig @10.253.53.53 <FILTER_SENTINEL>`).
+
+Restore:
+
+```bash
+ssh dns-iom-01 'sudo systemctl start adguardhome'
+ssh dns-ams-01 'sudo systemctl start adguardhome'
+```
+
+- [ ] Both agents re-advertise within ~6s (3 successful probes).
+- [ ] Routes auto-approve.
 
 ### Test 6b — agent crash → restart → recovery
 
@@ -314,7 +385,26 @@ sudo tailscale up
 
 - [ ] dns-ams-01 reconverges; route is re-advertised once agent passes probes.
 
-### Test 6e — n8n external route fencing (fail-open)
+### Test 6e — remote tailnet client end-to-end
+
+This is the cheapest acceptance check that catches the most embarrassing class of bug: VIP setup, ACLs, and Tailscale subnet-routing all work locally on the edge, but a real tailnet client can't actually reach the VIP. Run this **before** Phase 8 so the cutover is never the first time a non-edge client tries the VIP.
+
+From a tailnet client that is NOT itself a DNS edge (laptop, phone via Tailscale, etc.):
+
+```bash
+dig @10.253.53.53 cloudflare.com +short
+dig @10.253.53.53 dns-filter-sentinel.<your-public-domain> +short
+tailscale ping 10.253.53.53
+```
+
+- [ ] `dig @10.253.53.53 cloudflare.com` returns a real A record from at least one of {AMS, IOM, TOR, SHZ} (depending on which edge Tailscale routes you to).
+- [ ] `dig @10.253.53.53 dns-filter-sentinel.<your-public-domain>` returns empty (filtering active end-to-end).
+- [ ] `tailscale ping 10.253.53.53` succeeds, confirming the subnet route is reachable from the client's view of the tailnet.
+- [ ] Repeat from a second tailnet client in a different region (e.g., a phone on cellular vs. a desktop on home Wi-Fi). Both must succeed.
+
+If this test fails, do NOT proceed to the production cutover. Common causes: missing `autoApprovers` entry, edge nodes never had `tag:dns-edge` actually applied, VIP not bound on loopback, or `accept-dns=false` not set on edges.
+
+### Test 6f — n8n external route fencing (fail-open)
 
 Validates Layer 2 of the failover model (see [`BLUEPRINT.md`](BLUEPRINT.md) §"External Route Fencing via n8n" and Appendix E). The goal is to confirm n8n correctly fences a zombie-advertised edge that the agent itself cannot withdraw.
 
@@ -388,29 +478,71 @@ Do not advance to this phase until Phases 1–7 all show green acceptance criter
 
 - All edges report HEALTHY in `/health`.
 - All edges advertise the VIP and routes are auto-approved.
-- Test 6a/b/c/d/e all passed (including the n8n fail-open fencing test).
+- Test 6a-i/6a-ii/6b/6c/6d/6e/6f all passed (including the remote-client acceptance test and the n8n fail-open fencing test).
 - n8n route-fencing workflow is deployed on the Mac Studio with the `tag:dns-fencer` ACL and a working Tailscale API token; alerts are reaching their destination.
 - dns-ha-agent acceptance criteria in `dns-ha-agent/PHASES.md` all passed.
 
-### Steps
+### Cutover principle: full cutover, not gradual mix
+
+The v0 setup listed multiple Pi-hole nameservers as Tailscale globals — and one of the reasons we're doing this work at all is that iOS does not gracefully fall through that list when a resolver fails. Adding `10.253.53.53` to the same list "as a safety net" reintroduces exactly that ordering ambiguity: on iOS in particular, the OS may pick the old Pi-hole entries instead of the VIP, masking whether clients are actually using the new path and re-exposing the original resolver-order bug.
+
+The cleaner cutover is a single deliberate switch with a fast rollback plan, validated first on a handful of real clients.
+
+### Pre-cutover validation (on real client devices, NOT just the edges)
+
+Before changing the tailnet-wide setting, manually override DNS on 2–3 representative clients to point at `10.253.53.53` only:
+
+```bash
+# macOS (per-network):
+# System Settings → Network → <interface> → Details → DNS → set 10.253.53.53 as the only DNS server.
+
+# iOS:
+# Settings → Wi-Fi → (i) on current network → Configure DNS → Manual → add 10.253.53.53,
+# then delete any other entries. Also do the same for Cellular if relevant.
+
+# Linux client:
+# echo "nameserver 10.253.53.53" | sudo tee /etc/resolv.conf
+```
+
+- [ ] All three clients resolve `dig @10.253.53.53 cloudflare.com` to a real IP.
+- [ ] All three clients block `dig @10.253.53.53 dns-filter-sentinel.<your-public-domain>`.
+- [ ] iOS in particular: lock the screen, leave the network for ≥5 minutes, return, confirm DNS still works without a manual Tailscale reconnect.
+- [ ] Trigger an edge failure (e.g., `ssh dns-ams-01 'sudo systemctl stop dnsdist'`) and confirm the iOS client continues resolving within ≤30s. Restore the edge.
+- [ ] Run these checks for at least 24 hours on the manual-override clients before flipping the tailnet-wide setting.
+
+### Cutover
 
 1. Tailscale Admin Console → Settings → DNS.
-2. Add nameserver → Custom → `10.253.53.53`.
-3. Enable "Override local DNS".
-4. **Do not yet remove** the old Pi-hole nameserver entries — keep them as a safety net.
-5. From macOS, verify: `tailscale dns status` shows `10.253.53.53`; `dig @10.253.53.53 cloudflare.com` resolves; `dig @10.253.53.53 test.blocked.internal` returns NXDOMAIN.
-6. Observe normal use for 24 hours. Watch agent logs and dnsdist logs for anomalies.
-7. iOS test: disconnect and reconnect Tailscale on iOS. Confirm DNS resolves and filtering is active.
-8. Failover test from a real client: stop an edge, confirm iOS continues resolving within ~30s.
-9. Only after 24h of clean operation, remove old Pi-hole entries from Tailscale DNS settings.
+2. **Remove all existing Pi-hole nameserver entries.** Do not keep them as a "safety net" — see the principle above.
+3. Add nameserver → Custom → `10.253.53.53`.
+4. Enable "Override local DNS".
+5. Save.
+6. Remove the manual per-device overrides on the pre-cutover validation clients — they should now get `10.253.53.53` via the tailnet setting.
+7. Observe normal use for 24 hours. Watch agent logs, dnsdist logs, and `dns_ha_agent_fail_open` for anomalies.
+8. iOS test: disconnect and reconnect Tailscale on iOS. Confirm DNS resolves and filtering is active.
+9. Failover test from a real client: stop an edge, confirm iOS continues resolving within ~30s.
+
+### Rollback plan (keep ready, do NOT pre-configure)
+
+If the cutover causes client-visible breakage:
+
+```text
+Tailscale Admin Console → Settings → DNS
+  Remove: 10.253.53.53
+  Re-add: <previous Pi-hole nameserver IPs>
+  Save.
+```
+
+This is intentionally a manual rollback step rather than a parallel-nameserver safety net. The whole point of the cutover is to prove the VIP works for real clients; running both in parallel masks failures.
 
 ### Acceptance criteria
 
+- [ ] Pre-cutover validation on 2–3 manual-override clients passed for ≥24h before flipping the tailnet setting.
 - [ ] iOS resolves DNS via the VIP without manual reconnects.
 - [ ] iOS continues resolving during an induced edge failure within ≤30s.
-- [ ] Filtering remains active on all client paths (ad-tracker domains blocked).
+- [ ] Filtering remains active on all client paths (sentinel + ad-tracker domains blocked).
 - [ ] No client-visible breakage during 24h observation period.
-- [ ] Old Pi-hole nameserver entries removed from Tailscale DNS settings.
+- [ ] Tailscale DNS settings contain `10.253.53.53` as the ONLY nameserver entry (no leftover Pi-hole IPs).
 
 ---
 
