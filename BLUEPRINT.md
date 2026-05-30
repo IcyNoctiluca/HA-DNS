@@ -99,6 +99,11 @@ The same ACL also restricts both the agent's peer-health endpoint (TCP 8091) and
     },
     {
       "action": "accept",
+      "src":    ["tag:dns-edge", "tag:dns-fencer"],
+      "dst":    ["tag:dns-edge:1053"]
+    },
+    {
+      "action": "accept",
       "src":    ["tag:agh-admin"],
       "dst":    ["tag:dns-edge:3000"]
     }
@@ -449,10 +454,22 @@ The preamble (bind, ACL, policy) is identical on all edges — only the `newServ
 ```lua
 -- ============================================================
 -- PREAMBLE — identical on all edge nodes
+-- The EDGE_TS_IP value is templated per-node by Ansible.
 -- ============================================================
 
--- Bind to VIP on loopback only
+-- Primary listener: the shared VIP on loopback. This is the path
+-- normal tailnet clients hit via Tailscale DNS.
 setLocal("10.253.53.53:53")
+
+-- Diagnostic listener: full dnsdist → AGH → Unbound path, but
+-- reachable directly via this node's Tailscale IP on port 1053.
+-- Used by the n8n external fencer (see Appendix E) to probe each
+-- edge's *real* serving path — not just AGH on :5353. A failure on
+-- :1053 means this edge cannot serve queries even though AGH may
+-- be locally healthy. That is exactly the signal n8n needs.
+-- Restricted by Tailscale ACL to tag:dns-fencer + tag:dns-edge,
+-- and by host UFW (PHASES.md Phase 1 step 4d).
+addLocal("<EDGE_TS_IP>:1053")
 
 -- Allow Tailscale CGNAT and all RFC1918 ranges
 setACL({
@@ -657,17 +674,29 @@ Prefer a token with the narrowest available scope. Rotate it deliberately, and a
 
 ### Per-edge evidence collection
 
-For each edge:
+For each edge, n8n collects:
 
 ```bash
+# Agent self-report (may fail if agent is the broken component)
 curl -fsS http://<EDGE_TS_IP>:8091/health
 curl -fsS http://<EDGE_TS_IP>:8091/metrics
 
+# PRIMARY external DNS signal — full dnsdist → AGH → Unbound path
+# via this edge's dnsdist diagnostic listener (see Appendix B).
+# Failure here means the edge cannot actually serve queries, which
+# is exactly the signal we need to fence on.
+dig @<EDGE_TS_IP> -p 1053 cloudflare.com +short
+dig @<EDGE_TS_IP> -p 1053 dns-filter-sentinel.<your-public-domain> +short
+
+# SECONDARY diagnostic — AGH-only path on :5353.
+# Useful for narrowing down whether a failure is dnsdist or AGH,
+# but NOT the fencing signal: dnsdist could be down while AGH is
+# still healthy, and that case still warrants fencing.
 dig @<EDGE_TS_IP> -p 5353 cloudflare.com +short
 dig @<EDGE_TS_IP> -p 5353 dns-filter-sentinel.<your-public-domain> +short
 ```
 
-The `:5353` probe checks AGH + Unbound directly. If you later add a dnsdist diagnostic listener on `<EDGE_TS_IP>:1053`, switch the n8n probe to `:1053` so it tests the full dnsdist → AGH → Unbound path.
+The `:1053` listener tests the same path real tailnet clients take when they query `10.253.53.53` — just via the edge's direct Tailscale IP instead of the shared VIP, so n8n can target one specific edge at a time. The `:5353` probe is kept for diagnostic visibility (it tells the operator whether AGH alone is still healthy when dnsdist has failed), but the fencing decision must be driven by `:1053`.
 
 ### Fencing decision
 

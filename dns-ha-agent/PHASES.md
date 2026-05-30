@@ -8,7 +8,7 @@
 |---|---|---|
 | 0 | Project scaffolding | Repo + build + container builds successfully, smoke test passes |
 | 1 | Core probe + single-node advertise | Agent probes local DNS, advertises VIP when healthy, withdraws when not |
-| 2 | HTTP server + observability | `/health` and `/metrics` endpoints live; JSON logging |
+| 2 | HTTP server + observability + BackendProbe | `/health` and `/metrics` endpoints live; JSON logging; per-AGH-backend filter probes feeding metrics |
 | 3 | Peer monitoring + split-brain | Cross-edge peer health probing; PARTITIONED detection |
 | 4 | Liveness + reconciliation | WatchdogThread + startup reconciliation hardening |
 | 5 | CI/CD + digest pinning | Forgejo Actions builds + multi-arch + digest published as artifact |
@@ -47,55 +47,73 @@ The phases are designed so each one can be merged to main and yield a working (i
 
 ### Scope
 
-- `Config` record + `ConfigLoader` (Jackson YAML).
+- `Config` record + `ConfigLoader` (Jackson YAML). Includes `tailscale.managed_routes`, `tailscale.preserved_routes`.
 - `DnsProbe` — dual-check using dnsjava (resolve + filter).
 - `HealthState` with FSM (STARTING, HEALTHY, UNHEALTHY).
-- `Decider` (pure function).
+- `FsmReducer` (pure state-transition function).
+- `Decider` (pure decision function: FSM state + config → ADVERTISE / WITHDRAW).
 - `TailscaleClient` interface + `CliTailscaleClient` (subprocess).
-- `RouteStateStore` (intended routes in `/var/lib/dns-ha-agent/state.json`).
+- `Reconciler` — the **only** component that calls `TailscaleClient` for mutation. Computes desired = `managed_routes ∪ preserved_routes` (or just `preserved_routes` on WITHDRAW), compares against `currentlyAdvertised()`, mutates only on drift. Sets `dns_ha_agent_fail_open` if WITHDRAW didn't take effect.
+- **No `RouteStateStore` and no persisted route-intent file.** The config is the source of truth. A diagnostics-only "last observed" file may exist later but must be clearly non-authoritative.
 - `ProbeLoop` running in a virtual thread.
-- `App` wires it together.
+- `App` wires it together: probe → FsmReducer → Decider → Reconciler.
 - Logback config: JSON to stdout.
 
 ### Acceptance criteria
 
-- [ ] Unit tests for `ConfigLoader` (valid YAML parses; invalid → exit 78).
-- [ ] Unit tests for `Decider` (every FSM state → correct decision).
+- [ ] Unit tests for `ConfigLoader` (valid YAML parses; invalid → exit 78; missing `managed_routes` → exit 78).
+- [ ] Unit tests for `FsmReducer` (every (previous FSM, probe result) input → correct next FSM state; threshold counters; empty peer list short-circuits partition transitions).
+- [ ] Unit tests for `Decider` (every FSM state → correct decision; force-withdraw file overrides everything except SHUTTING_DOWN).
 - [ ] Unit tests for `HealthState` (counters, threshold transitions).
 - [ ] Unit tests for `CliTailscaleClient` (subprocess args correct; non-zero exit → exception).
+- [ ] Unit test for `Reconciler`: ADVERTISE → calls `TailscaleClient.advertiseRoutes(managed_routes ∪ preserved_routes)`.
+- [ ] Unit test for `Reconciler`: WITHDRAW → calls `TailscaleClient.advertiseRoutes(preserved_routes)` only.
+- [ ] Unit test for `Reconciler`: actual already matches desired → no `TailscaleClient` call (idempotent).
+- [ ] Unit test for `Reconciler`: observed Tailscale routes are NEVER treated as desired state; they're only used to decide whether a mutation is needed.
+- [ ] Unit test for `Reconciler`: changing `managed_routes` in config changes the desired route set without requiring any persisted-state migration.
+- [ ] Unit test for `Reconciler`: WITHDRAW + observed managed-route still advertised after mutation → `dns_ha_agent_fail_open = 1`.
 - [ ] Integration test (Testcontainers + FakeAgh): agent transitions STARTING → HEALTHY and calls `advertise` within 10s.
 - [ ] Integration test: FakeAgh returns real IP for blocked name → agent transitions to UNHEALTHY and calls `withdraw`.
 - [ ] No HTTP server, no metrics — these are Phase 2. Agent is fully functional via logs alone.
 
 ---
 
-## Phase 2 — HTTP server + observability
+## Phase 2 — HTTP server + observability + BackendProbe
 
-**Goal**: peers and humans can see what the agent thinks. JSON `/health`, Prometheus `/metrics`.
+**Goal**: peers and humans can see what the agent thinks. JSON `/health`, Prometheus `/metrics`. Per-AGH-backend filter probes are wired in here because their results live in `/health` and `/metrics`.
 
 ### Scope
 
-- Jersey + Grizzly server, bound to `http.bind_address:http.port`.
+- Jersey + Grizzly server, bound to `http.bind_address:http.port` (the node's Tailscale IP in production — NOT loopback).
 - `HealthResource` (`/health`) returning `HealthSnapshot` JSON.
 - `MetricsResource` (`/metrics`) returning Prometheus format.
 - Prometheus simpleclient instrumentation throughout existing code.
 - `HealthSnapshot` is an immutable record built from `HealthState.snapshot()`.
-- JSON schema matches `BLUEPRINT.md` §6 exactly.
+- JSON schema matches `BLUEPRINT.md` §6 exactly, **including the `backends` array** populated by `BackendProbe`.
+- `BackendProbe` — same dual probe (resolve + filter sentinel) as `DnsProbe`, but targeted directly at each configured AGH backend (`agh-ams-01`, `agh-iom-01`, etc.) on the slower `backend_probe.interval` cadence (default 30s). One virtual thread per backend.
+- Backend probe results are written into `HealthState` so they appear in `/health.backends[].resolve_ok / filter_ok` and as `dns_ha_agent_backend_resolve_ok{backend=…}` / `dns_ha_agent_backend_filter_ok{backend=…}` / `dns_ha_agent_backend_probe_total{backend=…,result=…}` in `/metrics`.
+- **Important non-effect**: BackendProbe failures DO NOT influence the FSM or the route-mutation decision. They only emit metrics. Only `DnsProbe` (the active-path probe via the VIP) drives state transitions. This keeps "a backup backend has broken filtering" as an alert, not a withdraw trigger.
 
 ### Acceptance criteria
 
-- [ ] `curl http://localhost:8091/health` returns 200 + valid JSON matching schema.
-- [ ] `curl http://localhost:8091/metrics` returns 200 + valid Prometheus format.
+Tests run against the node's Tailscale IP (the agent's configured `http.bind_address`), NOT `localhost` — the agent does not bind to the loopback in production. Local development can override `http.bind_address` to `127.0.0.1` if needed.
+
+- [ ] `curl http://<tailscale_ip>:8091/health` returns 200 + valid JSON matching schema (run from the edge itself or from another tailnet member with the `tag:dns-edge` or `tag:dns-fencer` tag).
+- [ ] `curl http://<tailscale_ip>:8091/metrics` returns 200 + valid Prometheus format.
 - [ ] All metrics listed in `BLUEPRINT.md` §6 are present and update correctly.
 - [ ] Integration test: state transitions are reflected in subsequent `/health` responses within one probe interval.
 - [ ] JVM metrics (heap, GC, threads) are auto-exported.
 - [ ] `/health` returns HEALTHY/UNHEALTHY/STARTING correctly in tests.
+- [ ] `curl http://localhost:8091/health` from inside the agent container FAILS (the server is not bound to loopback in production). If you need loopback access for local dev, set `http.bind_address: 127.0.0.1` in the config override — this must not be the production deployment value.
+- [ ] **BackendProbe runs**: with two configured backends (one healthy local FakeAGH and one healthy remote FakeAGH), `/health.backends[]` contains both entries with `resolve_ok: true` and `filter_ok: true` within one `backend_probe.interval`.
+- [ ] **BackendProbe metrics**: `dns_ha_agent_backend_resolve_ok` and `dns_ha_agent_backend_filter_ok` gauges exist with one labelled series per configured backend.
+- [ ] **BackendProbe does not drive FSM**: break filtering on a backup backend only (e.g., configure the FakeAGH to return a real IP for the sentinel); within one probe interval, `dns_ha_agent_backend_filter_ok{backend=…} == 0`, but the agent's FSM stays HEALTHY and the VIP remains advertised.
 
 ---
 
-## Phase 3 — Peer monitoring + split-brain
+## Phase 3 — Peer monitoring + asymmetric-inbound partition detection
 
-**Goal**: peer awareness and partition self-withdrawal.
+**Goal**: peer awareness and best-effort PARTITIONED self-withdrawal for the asymmetric-inbound case. PARTITIONED is NOT a full quorum/split-brain system — see `BLUEPRINT.md` §4. The load-bearing partition protection is Layer 0 (Tailscale node-level failover) plus Layer 2 (n8n external fencing).
 
 ### Scope
 
@@ -110,7 +128,8 @@ The phases are designed so each one can be merged to main and yield a working (i
 
 - [ ] Empty peer list disables peer monitoring entirely (single-node region behaviour). Verified by unit test.
 - [ ] With ≥2 peers, agent's `/health` reflects peer reachability accurately.
-- [ ] Integration test (two-agent Testcontainers setup): network-partition one container; after `peer_unreachable_threshold` + grace, the partitioned agent transitions to PARTITIONED and calls `withdraw`.
+- [ ] Integration test (two-agent Testcontainers setup): simulate **asymmetric inbound** failure on one container (block inbound to its `:8091` from the peer, leave outbound peer-poll intact); after `peer_unreachable_threshold` + grace, that agent reads itself in the peer's `unreachable_peers` list, transitions to PARTITIONED and calls `withdraw`.
+- [ ] Integration test: simulate **fully isolated** node (block both inbound and outbound traffic to peer `:8091`). Confirm the agent stays HEALTHY (local probes pass, no quorum to declare partition). This is the explicit not-covered case, validated as not-covered.
 - [ ] Restoring network: partitioned agent transitions back to HEALTHY and re-advertises within 30s.
 - [ ] Peer config update (add/remove peers) requires container restart — verified, not hot-reloaded.
 
@@ -125,7 +144,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - Startup reconciliation (`BLUEPRINT.md` §8 Startup step 4): on boot, call `currentlyAdvertised()`; if VIP present, explicitly withdraw before entering STARTING.
 - `WatchdogThread` — wakes every 10s, verifies probe loop reported within 30s, forces `System.exit(70)` on hang.
 - `Thread.setDefaultUncaughtExceptionHandler` routes virtual-thread exceptions to logging + exit.
-- HTTP server self-monitor: if loopback `/health` GET fails within 5s, same self-exit path.
+- HTTP server self-monitor: if a `/health` GET against the **configured `http.bind_address`** (i.e. the node's Tailscale IP in production, not `localhost`) fails within 5s, same self-exit path. Probing loopback would falsely report the server down because the agent does not bind to the loopback.
 - Graceful SIGTERM handler: transition to SHUTTING_DOWN, withdraw, drain HTTP, flush, exit 0.
 
 ### Acceptance criteria
@@ -134,6 +153,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - [ ] Integration test: inject `Thread.sleep(Long.MAX_VALUE)` into probe loop in a test build. Within 30s the `WatchdogThread` detects and the process exits non-zero. Restart policy then restarts.
 - [ ] Integration test: send SIGTERM. Agent withdraws within 5s and exits 0.
 - [ ] Integration test: SIGKILL the agent. Restart policy restarts it. New instance performs reconciliation (withdraws stale VIP) before re-validating.
+- [ ] **HTTP self-monitor uses `http.bind_address`**: unit/integration test that the self-monitor's `/health` probe is constructed against `config.http.bind_address`, not `localhost` / `127.0.0.1`. Pointing the test agent at a bind address that intentionally returns 5xx for `/health` triggers self-exit within ~5s; pointing it at a healthy bind address does not.
 - [ ] No code path advertises without going through STARTING → HEALTHY.
 
 ---

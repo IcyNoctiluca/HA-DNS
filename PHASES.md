@@ -32,21 +32,25 @@ The agent's local probe and several rollout/monitoring checks rely on a **filter
 1. Pick a subdomain of a domain you control (e.g., `dns-filter-sentinel.<your-public-domain>`).
 2. Create a real public A record for it (any routable IP works — a 192.0.2.x TEST-NET-1 address, or your own homelab IP, as long as it's NOT `0.0.0.0` and would actually resolve if AGH were bypassed).
 3. On the primary AGH instance (`dns-ams-01`), add a custom block rule for that exact name. adguardhome-sync will propagate the rule to all replicas.
-4. Verify the asymmetry from any machine before continuing:
+4. Choose and standardise the **expected AGH block response** across all replicas. The agent's `probe.block_expectation` validates that the rcode is in `allowed_rcodes` (NXDOMAIN / REFUSED / NOERROR) AND, on NOERROR, that every returned address is in `allowed_ips` (default `0.0.0.0`). Pick AGH's blocking mode once, document it here, and confirm every replica behaves the same way.
+5. Verify the asymmetry from any machine before continuing:
    ```bash
    dig @1.1.1.1 dns-filter-sentinel.<your-public-domain> +short
    # Expected: the public A record value (or your chosen routable IP)
 
-   dig @<AGH_AMS_TS_IP> -p 5353 dns-filter-sentinel.<your-public-domain> +short
-   # Expected: empty (blocked by AGH)
+   dig @<AGH_AMS_TS_IP> -p 5353 dns-filter-sentinel.<your-public-domain>
+   # Expected behaviour MUST match the configured block_expectation:
+   #   - rcode NXDOMAIN / REFUSED, OR
+   #   - rcode NOERROR with answer 0.0.0.0 (or whatever you set in allowed_ips)
+   # Anything that returns the real public A record value is a FAILURE.
    ```
-5. Record the sentinel name in `dns_ha_agent_filter_sentinel` (Ansible group var) so the agent config, dnsdist filter probes, and monitoring scripts all reference the same value.
+6. Record the sentinel name in `dns_ha_agent_filter_sentinel` (Ansible group var) so the agent config, dnsdist filter probes, and monitoring scripts all reference the same value.
 
 Acceptance:
 
 - [ ] Sentinel domain resolves publicly via `1.1.1.1` to the configured A record.
-- [ ] Sentinel domain returns empty/NXDOMAIN via `AGH_AMS:5353`.
-- [ ] adguardhome-sync has propagated the rule to all replicas (`agh-iom-01`, `agh-tor-01`, etc.) — verified by repeating the AGH probe against each replica.
+- [ ] Sentinel domain returns a response matching `block_expectation` (NXDOMAIN / REFUSED / NOERROR + allowed_ip) via `AGH_AMS:5353`.
+- [ ] adguardhome-sync has propagated the rule to all replicas (`agh-iom-01`, `agh-tor-01`, etc.) — verified by repeating the AGH probe against each replica AND confirming the response shape matches across all of them. Drift between replicas (e.g. one returns NXDOMAIN, another returns NOERROR + 0.0.0.0) is acceptable only if every variant is in the configured `allowed_rcodes` / `allowed_ips` set.
 
 ---
 
@@ -118,6 +122,20 @@ done
 sudo ufw allow from <MAC_STUDIO_TS_IP> to any port 8091 proto tcp   # n8n fencer + Prometheus
 sudo ufw allow from 127.0.0.1 to any port 8091 proto tcp
 sudo ufw deny to any port 8091 proto tcp
+
+# 4d. Firewall: dnsdist diagnostic listener port 1053 — full edge path
+#     for n8n external fencing probes (Appendix E). Same restriction model
+#     as :8091: edge peers + Mac Studio (n8n) + loopback only, deny LAN.
+for EDGE in <AMS01_TS_IP> <IOM01_TS_IP> <TOR01_TS_IP> <SHZ01_TS_IP>; do
+  sudo ufw allow from $EDGE to any port 1053 proto udp
+  sudo ufw allow from $EDGE to any port 1053 proto tcp
+done
+sudo ufw allow from <MAC_STUDIO_TS_IP> to any port 1053 proto udp
+sudo ufw allow from <MAC_STUDIO_TS_IP> to any port 1053 proto tcp
+sudo ufw allow from 127.0.0.1 to any port 1053 proto udp
+sudo ufw allow from 127.0.0.1 to any port 1053 proto tcp
+sudo ufw deny to any port 1053 proto udp
+sudo ufw deny to any port 1053 proto tcp
 sudo ufw reload
 
 # 5. Install dnsdist
@@ -148,10 +166,11 @@ ansible-playbook -l dns-ams-01 playbooks/dns-ha-agent.yml
 # then calls `tailscale set --advertise-routes=10.253.53.53/32`.
 
 # 10. Verify port layout (Pi-hole in BIND mode = LAN IP ONLY, NOT eth0+tailscale0)
-sudo ss -tulpen | grep -E ':53|:5353|:5335|:8091|:3000'
+sudo ss -tulpen | grep -E ':53|:5353|:5335|:8091|:3000|:1053'
 # Expected:
 #   Pi-hole   → LAN_IP:53 (udp+tcp)
 #   dnsdist   → 10.253.53.53:53 (udp+tcp)
+#   dnsdist   → tailscale0_IP:1053 (udp+tcp) — diagnostic listener for n8n
 #   AGH       → 127.0.0.1:5353, tailscale0_IP:5353 (udp+tcp)
 #   AGH admin → 127.0.0.1:3000, tailscale0_IP:3000 (tcp)
 #   Unbound   → 127.0.0.1:5335 (udp+tcp)
@@ -185,6 +204,8 @@ docker restart dns-ha-agent                # agent re-advertises; auto-approves 
 - [ ] `dig @127.0.0.1 -p 5353 dns-filter-sentinel.<your-public-domain>` returns empty (filtering works).
 - [ ] `dig @127.0.0.1 -p 5335 cloudflare.com +trace` shows the full recursive chain (Unbound is recursing, not forwarding).
 - [ ] `dig @10.253.53.53 cloudflare.com` resolves via dnsdist (full path works).
+- [ ] `dig @<AMS01_TS_IP> -p 1053 cloudflare.com` resolves via dnsdist's diagnostic listener (same full path, edge-direct).
+- [ ] `dig @<AMS01_TS_IP> -p 1053 dns-filter-sentinel.<your-public-domain>` returns empty (filter active on the diagnostic path).
 - [ ] `dig +dnssec +bufsize=1232 @10.253.53.53 cloudflare.com` returns an answer (no UDP truncation).
 - [ ] `curl http://AMS01_TS_IP:8091/health | jq '.state'` returns `"HEALTHY"`.
 - [ ] `curl http://AMS01_TS_IP:8091/health | jq '.vip_advertised'` returns `true`.
@@ -344,28 +365,38 @@ docker start dns-ha-agent
 - [ ] Agent re-advertises route.
 - [ ] Startup reconciliation log line visible: agent confirmed pre-existing advertisement (if any) was withdrawn before re-validating.
 
-### Test 6c — partition detection
+### Test 6c — PARTITIONED detection (asymmetric inbound only)
+
+PARTITIONED is best-effort asymmetric-inbound-reachability protection, not a full quorum/split-brain system. It catches the case where this node can still poll its peers but peers cannot reach this node — the agent reads its own name from peers' `unreachable_peers` lists.
+
+The previous version of this test blocked AMS's **outbound** traffic to peer `:8091`. That cannot work: a node that cannot poll its peers cannot learn that peers report it unreachable, and per the agent's own error-handling rule it stays HEALTHY. The fully-isolated case is covered by Layer 0 (Tailscale node-level failover) and Layer 2 (n8n external fencing) instead — see Test 6f.
+
+The correct simulation blocks **inbound** access to AMS's `:8091` from each peer's Tailscale IP, while leaving AMS's outbound peer-poll traffic intact:
 
 ```bash
 ssh dns-ams-01
-sudo iptables -A OUTPUT -d IOM_TS_IP -p tcp --dport 8091 -j DROP
-sudo iptables -A OUTPUT -d TOR_TS_IP -p tcp --dport 8091 -j DROP
-sudo iptables -A OUTPUT -d SHZ_TS_IP -p tcp --dport 8091 -j DROP
+sudo iptables -A INPUT -s IOM_TS_IP -p tcp --dport 8091 -j DROP
+sudo iptables -A INPUT -s TOR_TS_IP -p tcp --dport 8091 -j DROP
+sudo iptables -A INPUT -s SHZ_TS_IP -p tcp --dport 8091 -j DROP
 ```
 
-- [ ] After ≥60s (`peer_unreachable_threshold`), dns-ams-01 agent transitions to PARTITIONED.
+- [ ] dns-iom-01, dns-tor-01, dns-shz-01 each begin to list `dns-ams-01` in their `unreachable_peers` array within ~30s (one peer poll cycle plus retries).
+- [ ] dns-ams-01's PeerMonitor reads `dns-ams-01` in each peer's `unreachable_peers` and starts the `peer_unreachable_threshold` timer.
+- [ ] After ≥60s, dns-ams-01 agent transitions to PARTITIONED.
 - [ ] Agent withdraws route.
 - [ ] EU continues serving from dns-iom-01.
 
 Restore:
 
 ```bash
-sudo iptables -D OUTPUT -d IOM_TS_IP -p tcp --dport 8091 -j DROP
-sudo iptables -D OUTPUT -d TOR_TS_IP -p tcp --dport 8091 -j DROP
-sudo iptables -D OUTPUT -d SHZ_TS_IP -p tcp --dport 8091 -j DROP
+sudo iptables -D INPUT -s IOM_TS_IP -p tcp --dport 8091 -j DROP
+sudo iptables -D INPUT -s TOR_TS_IP -p tcp --dport 8091 -j DROP
+sudo iptables -D INPUT -s SHZ_TS_IP -p tcp --dport 8091 -j DROP
 ```
 
 - [ ] Agent recovers to HEALTHY within 15s.
+
+**Not a Phase 8 production gate.** If this test fails or is flaky on the asymmetric simulation, it does NOT block the cutover. PARTITIONED is an opportunistic safety net; the load-bearing protections for the partition class of failure are Layer 0 (Tailscale's own ~15s node-level failover) and Layer 2 (Test 6f, n8n route fencing).
 
 ### Test 6d — node-level failover
 
@@ -425,7 +456,8 @@ sudo systemctl stop dnsdist
 
 - [ ] Either: dns-ha-agent reports `state != HEALTHY` and `dns_ha_agent_fail_open == 1`,
       OR: agent is unreachable from n8n and the Tailscale API still reports the route enabled.
-- [ ] External per-edge DNS probe to `<AMS01_TS_IP>:5353` fails (or returns broken results).
+- [ ] **Primary external probe** to `<AMS01_TS_IP>:1053` (dnsdist diagnostic listener) fails — this is the fencing signal because it exercises the full dnsdist → AGH → Unbound path.
+- [ ] (Secondary diagnostic only) `<AMS01_TS_IP>:5353` may still resolve if AGH is locally healthy — this is informational, not the fencing trigger.
 - [ ] Within ~60–90s (one n8n poll + threshold), n8n disables `dns-ams-01`'s `10.253.53.53/32` route approval via the Tailscale API.
 - [ ] n8n sends the configured alert and writes an audit record (node, evidence, action, API response, timestamp).
 - [ ] From a tailnet client, `dig @10.253.53.53 cloudflare.com` resolves via another edge.

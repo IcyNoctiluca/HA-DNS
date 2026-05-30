@@ -4,7 +4,7 @@ Read this before making any changes to this codebase. These are the invariants a
 
 ## Critical context
 
-This service is **the sole authority for advertising/withdrawing the HA DNS VIP route on Tailscale**. A bug here can:
+This service is **the sole authority for *local self-mutation* of this node's Tailscale route advertisement** (i.e., the only thing that runs `tailscale set --advertise-routes=...` on this host). External system-level fencing — the n8n workflow described in `../BLUEPRINT.md` Appendix E — may independently disable a node's *approved* route via the Tailscale API; that is a separate layer for fail-open remediation and does not violate this invariant. A bug in this service can:
 - Leave a sick node advertising the VIP (clients route to a broken edge).
 - Cause flapping advertisements (Tailscale failover thrashes; clients see intermittent DNS).
 - Silently degrade filtering (the agent reports HEALTHY but the filter check is broken).
@@ -27,7 +27,7 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 
 1. **All Tailscale mutations go through `TailscaleClient`.** Do not call `tailscale set` from anywhere else. Do not call it from a shell script. Do not call it from a separate sidecar. The interface is the choke point — every mutation must traverse it so it can be mocked in tests, logged consistently, and reasoned about.
 2. **`TailscaleClient.advertiseRoutes()` and `withdrawRoutes()` are idempotent.** Calling either twice in a row with the same target state must be a no-op the second time. This is the contract callers rely on.
-3. **The state file (`/var/lib/dns-ha-agent/state.json`) is the source of truth for intended route advertisements**, not `tailscale status` output. We never derive intent from observed state. We reconcile observed state toward intent.
+3. **The YAML config is the source of truth for route ownership.** `tailscale.managed_routes` declares the routes this agent may add/remove. `tailscale.preserved_routes` declares routes that must remain advertised when the agent withdraws its managed routes. The agent never derives intent from `tailscale status`; it only observes actual state in order to reconcile it toward the config-derived desired state. **Do not introduce a persistent `RouteStateStore` for intended route ownership in v1.** Persisted route intent can become stale across config changes and crash/restart boundaries. The desired route set is recomputed from config and the current FSM decision on every reconciliation. A diagnostics-only "last observed" file is acceptable if it's clearly labelled non-authoritative.
 4. **Startup MUST perform reconciliation** (`BLUEPRINT.md` §Operational Behaviour). A new instance never inherits "we were advertising" from a dead predecessor without going through STARTING → HEALTHY first.
 5. **The agent's own DNS lookups never go through the VIP it manages.** Bootstrap circularity. Use the local Unbound on `127.0.0.1:5335` or explicit resolver IPs in probe code.
 6. **`HealthState` mutations use the atomic-ref-swap pattern.** Build an immutable snapshot, swap the reference, broadcast. Do not add `synchronized` to read paths — they must be lock-free.

@@ -75,11 +75,13 @@ At the wider system level, an n8n workflow on the Mac Studio may consume this se
 
 | Component | Responsibility |
 |---|---|
-| `DnsProbe` | Runs dual probe (resolve `cloudflare.com`, confirm `dns-filter-sentinel.<your-public-domain>` is filtered) against `10.253.53.53` on a configurable interval. The block-name must be a sentinel that resolves PUBLICLY but is blocked by AGH — see §5 config schema for the rationale. |
-| `BackendProbe` | Runs the same resolve+filter dual probe directly against each AGH backend in the edge's regional pool, on a slower cadence (default 30s). Surfaces broken filtering on backup backends *before* dnsdist fails over to them. Failures emit metrics and `/health` flags but do NOT trigger route withdraw — that's `DnsProbe`'s job for the active path. |
+| `DnsProbe` | Runs dual probe against `10.253.53.53` on a configurable interval. Resolve check: passes if AT LEAST ONE of `probe.resolve_names` returns a valid answer. Filter check: passes if the sentinel block name returns one of `probe.block_expectation.allowed_rcodes` AND (when NOERROR) every returned address is in `allowed_ips` — fails if any returned routable address is not allowed. See §5 schema for the rationale on each setting. |
+| `BackendProbe` | Runs the same resolve + filter dual probe directly against each AGH backend in the edge's regional pool, on a slower cadence (default 30s). Reuses `probe.resolve_names`, `probe.block_name`, and `probe.block_expectation` — identical filter semantics to `DnsProbe`. Surfaces broken filtering on backup backends *before* dnsdist fails over to them. Failures emit metrics and `/health` flags but do NOT trigger route withdraw — that's `DnsProbe`'s job for the active path. |
 | `PeerMonitor` | Concurrently polls each peer's `/health` endpoint, tracks reachability and reported state. One virtual thread per peer. |
 | `HealthState` | Thread-safe holder of current state via atomic-ref-swap of immutable snapshots: latest probe result, fail/success counters, per-peer reachability, current advertised state. |
-| `Decider` | Pure function: given `HealthState` + config, returns `ADVERTISE` or `WITHDRAW` decision. Easy to unit-test. |
+| `FsmReducer` | Pure state-transition function. Converts probe/peer observations plus the prior health snapshot into the next FSM state. No side effects. |
+| `Decider` | Pure decision function. Converts FSM state + config into `ADVERTISE` or `WITHDRAW`. No side effects. |
+| `Reconciler` | Side-effecting component. Combines the `Decider` output with `tailscale.managed_routes` and `tailscale.preserved_routes` from config, observes the current Tailscale advertised route set via `TailscaleClient.currentlyAdvertised()`, and invokes `TailscaleClient.advertiseRoutes(...)` only when the actual set differs from the desired set. This is the **only** component that calls `TailscaleClient` for mutation. Computes `dns_ha_agent_fail_open` after each mutation attempt. |
 | `TailscaleClient` (interface) | Abstracts the Tailscale mutation. Production impl uses subprocess to `tailscale` CLI. Tests use a fake. |
 | `HealthServer` | Jersey-based HTTP server exposing `/health` (peer-facing) and `/metrics` (Prometheus). |
 | `App` | Entry point: loads config, wires components, manages lifecycle (startup, graceful shutdown on SIGTERM). |
@@ -127,6 +129,8 @@ The agent transitions through these states based on probe results:
 - **HEALTHY**: probes are passing. Route *is* advertised.
 - **UNHEALTHY**: local probes have failed `fail_threshold` consecutive times. Route is withdrawn. Continues probing.
 - **PARTITIONED**: `min_peer_reports_to_self_withdraw` peers have reported this node as unreachable for `peer_unreachable_threshold`. Route is withdrawn even if local probes pass.
+
+  **Scope of this state (important):** PARTITIONED is *best-effort asymmetric-inbound-reachability protection*, not a full split-brain or quorum system. It only catches the case where this node can still reach its peers (so it can read their `unreachable_peers` lists) but peers cannot reach this node back. The fully-isolated case — where this node cannot reach any peers — is explicitly NOT covered by this state (the agent's own error-handling rules say "stay HEALTHY if local probes pass but all peers are unreachable, because there is no quorum to declare partition"). For fully-isolated nodes, recovery comes from Layer 0 (Tailscale node-level failover, ~15s) plus Layer 2 (n8n external route fencing) — see [`../BLUEPRINT.md`](../BLUEPRINT.md). PARTITIONED is therefore an opportunistic safety net, not a v1.0 production gate.
 - **SHUTTING_DOWN**: SIGTERM received. Withdraws route, waits up to 5s for confirmation, exits.
 
 ### Transitions
@@ -144,7 +148,7 @@ The agent transitions through these states based on probe results:
 
 1. **Single-node region (zero peers configured)**: PARTITIONED state is unreachable. Agent uses local probes only. This matches SHZ-01's role in the current topology.
 2. **Cold start safety**: STARTING → HEALTHY requires `success_threshold` probes (default 3 × 2s = 6s), so a freshly-started agent on a node where the stack isn't ready won't briefly advertise.
-3. **Idempotency**: every `Tailscale set` call sends the full intended route list, computed from a state file. The agent never sends "delta" mutations.
+3. **Idempotency**: every `tailscale set` call sends the full desired route list, recomputed each cycle from config (`managed_routes` + `preserved_routes`) and the current FSM decision. The agent never sends "delta" mutations and never reads route intent from a persisted state file.
 
 ---
 
@@ -169,9 +173,16 @@ node:
 probe:
   # The DNS target the agent probes (the VIP, served by local dnsdist).
   target: 10.253.53.53
-  # A name that MUST resolve to a real A record (resolve check).
-  resolve_name: cloudflare.com
+
+  # Names that MUST resolve to a real A record (resolve check).
+  # The check passes if AT LEAST ONE name returns a valid answer.
+  # Using more than one guards against withdrawing the route because a single
+  # external authoritative resolver is transiently unhappy.
+  resolve_names:
+    - cloudflare.com
+    - example.com
   resolve_type: A
+
   # A name that MUST be blocked by AGH (filter check).
   #
   # IMPORTANT — pick a sentinel that resolves PUBLICLY when AGH is bypassed,
@@ -184,6 +195,26 @@ probe:
   #   1. dnsdist → AGH path is in use (otherwise it would resolve to the real IP), and
   #   2. AGH's blocklist machinery is working.
   block_name: dns-filter-sentinel.<your-public-domain>
+
+  # AGH can signal blocking in several ways depending on its configuration:
+  # NXDOMAIN, REFUSED, or NOERROR with a sentinel IP like 0.0.0.0. The probe
+  # accepts any of these as long as the REAL public IP is not returned.
+  # Returning the real public IP is always a failure (filter bypassed).
+  block_expectation:
+    # must_not_return_real_ip:
+    #   pass if rcode is NXDOMAIN or REFUSED; OR
+    #   pass if rcode is NOERROR and every returned address is in allowed_ips;
+    #   fail if any returned address is the real public IP or not in allowed_ips.
+    mode: must_not_return_real_ip
+    allowed_rcodes:
+      - NXDOMAIN
+      - REFUSED
+      - NOERROR
+    # When rcode is NOERROR, every returned A record must be in this list.
+    # AGH's default block response is 0.0.0.0; add other sentinels if you
+    # configure custom block IPs.
+    allowed_ips:
+      - "0.0.0.0"
   # Probe cadence and thresholds.
   interval: 2s
   query_timeout: 2s
@@ -207,6 +238,9 @@ backend_probe:
   enabled: true
   interval: 30s
   query_timeout: 2s
+  # BackendProbe reuses probe.resolve_names, probe.block_name, and
+  # probe.block_expectation. No duplication; the only thing that varies
+  # per backend is the target address.
   backends:
     - name: agh-ams-01
       address: 127.0.0.1:5353
@@ -241,9 +275,21 @@ tailscale:
   mode: cli
   # Path to tailscale CLI in the container (baked into image).
   cli_path: /usr/bin/tailscale
-  # Additional routes to always preserve when mutating advertise list.
+
+  # Routes this agent is ALLOWED to manage (advertise when HEALTHY,
+  # withdraw otherwise). In v1 this should normally contain exactly the
+  # HA DNS VIP. The Reconciler treats this list as the source of truth
+  # for what this agent owns — never a persisted state file.
+  managed_routes:
+    - 10.253.53.53/32
+
+  # Routes that may already be advertised by the host and must NOT be wiped
+  # when the agent calls `tailscale set --advertise-routes=...`.
   # Safety hatch for "I added a subnet route for k3s testing, don't wipe it."
+  # The Reconciler always includes these in the desired set regardless of
+  # the HEALTHY/UNHEALTHY decision.
   preserved_routes: []
+
   # Timeout for tailscale set invocations.
   command_timeout: 10s
 
@@ -345,7 +391,13 @@ Peer-facing endpoint. Returns the agent's current self-assessment and view of it
 
 The `unreachable_peers` field lists peer names this agent currently cannot reach — peers consult this field to determine if they're being reported unreachable.
 
-**No application-layer authentication.** Access control is via Tailscale ACL (only `tag:dns-edge` nodes can reach port 8091 on edges). This is consistent with the homelab pattern of relying on tailnet boundary as the security perimeter.
+**No application-layer authentication.** Access control is layered, because Tailscale ACLs alone do not protect LAN-side traffic:
+
+1. **Bind to Tailscale IP, not `0.0.0.0`** (`http.bind_address` defaults to `ansible_tailscale0.ipv4.address`). With `network_mode: host`, a wildcard bind would expose `/health` and `/metrics` on the host's LAN NIC too — Tailscale ACLs do not see LAN traffic, so anything on the same LAN could scrape the endpoints. Binding to the Tailscale IP closes that off at the socket level.
+2. **Host firewall (UFW) deny on `:8091` from non-Tailscale sources** (see `../PHASES.md` Phase 1 step 4c). Defence-in-depth — if the bind ever drifts to `0.0.0.0` by misconfiguration, UFW still blocks the LAN path.
+3. **Tailscale ACL restricts tailnet sources** — only `tag:dns-edge` (peer agents) and `tag:dns-fencer` (n8n on the Mac Studio) can reach `tag:dns-edge:8091`. This is the only layer that scopes *which* tailnet members can scrape the endpoints; the bind + UFW are about preventing non-tailnet access entirely.
+
+Together these match the homelab pattern of tailnet boundary plus defence-in-depth at the host. There is no application-layer token because the scope of `/health` is already operational metadata, not secrets.
 
 ### `GET /metrics`
 
@@ -421,7 +473,15 @@ dns_ha_agent_fail_open_duration_seconds 0
 
 ## 7. Decision Logic
 
-Pure function. Inputs: current `HealthState`, config. Output: `ADVERTISE` or `WITHDRAW`.
+The decision pipeline is split into three explicit components so each can be reasoned about and unit-tested in isolation:
+
+1. **`FsmReducer`** — pure state-transition function. Inputs: previous `FsmState`, latest `ProbeResult`, latest `PeerObservation` set, config. Output: next `FsmState`. No side effects.
+2. **`Decider`** — pure decision function. Inputs: `FsmState`, config (force-withdraw file check, partition condition). Output: `ADVERTISE` or `WITHDRAW`. No side effects.
+3. **`Reconciler`** — side-effecting. Inputs: `Decision`, config (`managed_routes`, `preserved_routes`), `TailscaleClient.currentlyAdvertised()`. Computes the **desired route set** and calls `TailscaleClient.advertiseRoutes(...)` only if it differs from the actual set. Also computes `dns_ha_agent_fail_open` after the mutation attempt.
+
+### Decider (pure)
+
+Inputs: current `HealthState`, config. Output: `ADVERTISE` or `WITHDRAW`.
 
 ```
 function decide(state, config):
@@ -456,7 +516,46 @@ function decide(state, config):
 
 The FSM transitions are evaluated on every probe cycle. The `Decider` is stateless; state is held in `HealthState`.
 
-After each decision, the route mutation step records `desired_vip_advertised` from the decision and `vip_advertised` from `tailscaleClient.currentlyAdvertised()`. If the effective decision is `WITHDRAW` but the VIP remains in `currentlyAdvertised()` after the mutation attempt, `dns_ha_agent_fail_open` is set to `1` and `dns_ha_agent_fail_open_duration_seconds` starts/continues counting. This is the signal that n8n's external route fencing watches for.
+### Reconciler (side-effecting)
+
+The Reconciler computes the desired route set from config + decision and converges actual Tailscale advertised routes toward it. The agent never derives intent from observed state — observed state is only used to decide whether a mutation is needed and to compute `fail_open`.
+
+```
+function reconcile(decision, config, tailscaleClient):
+    if decision == ADVERTISE:
+        desired_routes = config.tailscale.managed_routes ∪ config.tailscale.preserved_routes
+    else:  # WITHDRAW
+        desired_routes = config.tailscale.preserved_routes
+
+    actual_routes = tailscaleClient.currentlyAdvertised()
+
+    if actual_routes == desired_routes:
+        return                # no-op; idempotent
+
+    try:
+        tailscaleClient.advertiseRoutes(desired_routes)
+        increment route_mutations_total{result="success"}
+    catch TailscaleException:
+        increment route_mutations_total{result="failure"}
+        # fall through to fail-open check
+
+    # After mutation attempt, re-check actual state. If decision was WITHDRAW
+    # but any managed_route is still advertised, we are FAIL-OPEN — Layer 2
+    # (n8n external route fencing) will pick this up via metrics.
+    actual_routes = tailscaleClient.currentlyAdvertised()
+    if decision == WITHDRAW and any(r in actual_routes for r in config.tailscale.managed_routes):
+        dns_ha_agent_fail_open = 1
+        dns_ha_agent_fail_open_duration_seconds += elapsed_since_fail_open_started
+    else:
+        dns_ha_agent_fail_open = 0
+        dns_ha_agent_fail_open_duration_seconds = 0
+```
+
+Important properties:
+
+- **Config-derived, not state-file-derived.** Changing `managed_routes` in config and restarting takes effect on the next reconcile; no state-file migration is required.
+- **Idempotent.** If actual already matches desired, nothing is invoked. Reconciliation runs every probe cycle and corrects external drift (e.g., an operator's manual `tailscale set`).
+- **Preserved routes are inviolable.** They appear in the desired set regardless of decision, so a non-DNS route added externally is never wiped by the agent's withdraw.
 
 ---
 
@@ -493,10 +592,10 @@ If SIGKILL is received (or process crashes), the route advertisement remains. Do
 Implementation:
 
 - A dedicated `WatchdogThread` (separate from the probe loop) wakes every 10s and verifies that the probe loop has reported a result (success or failure) within the last 30s. If not, the probe loop has hung — the watchdog logs `FATAL: probe loop hung, forcing exit` and calls `System.exit(70)` (EX_SOFTWARE).
-- The HTTP server is also monitored: if it fails to respond to its own loopback `/health` GET within 5s, same self-exit path.
+- The HTTP server is also monitored: if it fails to respond to a `/health` GET against its own configured `http.bind_address` within 5s, same self-exit path. (Not `localhost` — the agent binds to the node's Tailscale IP, not the loopback, so a loopback probe would falsely report the server down.)
 - Uncaught exceptions in any virtual thread are routed to `Thread.setDefaultUncaughtExceptionHandler` which logs and exits.
 
-The Docker `HEALTHCHECK` directive remains in the Dockerfile but its role is **diagnostic only** (visible in `docker ps` for operator visibility, scraped by monitoring) — recovery comes from the agent self-exiting + Docker restart policy, not from the healthcheck triggering a restart.
+**There is no Dockerfile-level `HEALTHCHECK`** (see §11). The `/health` endpoint binds to the node's Tailscale IP, which is only known at deploy time, so a Dockerfile-baked healthcheck against `localhost` would always fail in production. The healthcheck is defined in the Ansible-rendered `docker-compose.yml` with the per-node Tailscale IP templated in. That Compose-level healthcheck is **diagnostic only** — visible in `docker ps` and scraped by monitoring, but does NOT trigger a restart on its own. Recovery from hangs comes from the `WatchdogThread` + `restart: unless-stopped`, not from the healthcheck.
 
 ### Operator override: force-withdraw
 
@@ -583,11 +682,11 @@ dns-ha-agent/
     ├── main/java/io/homelab/dnsha/
     │   ├── App.java
     │   ├── config/{Config,ConfigLoader,ConfigValidator}.java
-    │   ├── probe/{DnsProbe,ProbeResult,ProbeLoop}.java
+    │   ├── probe/{DnsProbe,BackendProbe,ProbeResult,ProbeLoop}.java
     │   ├── peer/{PeerMonitor,PeerState,PeerHealthResponse}.java
-    │   ├── state/{HealthState,FsmState}.java
+    │   ├── state/{HealthState,FsmState,FsmReducer}.java
     │   ├── decide/{Decider,Decision}.java
-    │   ├── tailscale/{TailscaleClient,CliTailscaleClient,RouteStateStore}.java
+    │   ├── tailscale/{TailscaleClient,CliTailscaleClient,Reconciler}.java
     │   ├── http/{HealthServer,HealthResource,MetricsResource}.java
     │   └── lifecycle/{ShutdownHook,WatchdogThread}.java
     └── test/java/...
@@ -619,9 +718,24 @@ public final class HealthState {
     public HealthSnapshot snapshot();   // immutable view for /health
 }
 
+// FsmReducer — pure
+public final class FsmReducer {
+    public static FsmState reduce(FsmState previous, ProbeResult probe,
+                                  Set<PeerObservation> peers, Config config);
+}
+
 // Decider — pure
 public final class Decider {
     public static Decision decide(HealthState state, Config config);
+}
+
+// Reconciler — the ONLY component that calls TailscaleClient for mutation.
+// Computes desired = managed_routes ∪ preserved_routes (or just preserved_routes
+// on WITHDRAW), compares against currentlyAdvertised(), invokes advertiseRoutes
+// only on drift. Also sets dns_ha_agent_fail_open if WITHDRAW didn't take effect.
+public final class Reconciler {
+    public Reconciler(TailscaleClient client, MetricsRegistry metrics, Config config);
+    public void reconcile(Decision decision);
 }
 
 // TailscaleClient — interface
@@ -712,10 +826,12 @@ tasks.shadowJar {
 | Module | What to test |
 |---|---|
 | `ConfigLoader` | Valid YAML parses; invalid YAML rejected with clear error; unknown version exits with code 78; default values applied. |
-| `Decider` | Every FSM state → correct decision. Partition logic respects peer count threshold. Empty peer list disables partition logic. |
+| `FsmReducer` | Every (previous FSM, probe result) input pair → correct next FSM state. Threshold counters bump correctly. Empty peer list short-circuits partition transitions. |
+| `Decider` | Every FSM state → correct decision. Partition logic respects peer count threshold. Empty peer list disables partition logic. Force-withdraw file overrides everything except SHUTTING_DOWN. |
+| `Reconciler` | (1) ADVERTISE → calls `TailscaleClient.advertiseRoutes(managed_routes ∪ preserved_routes)`. (2) WITHDRAW → calls it with only `preserved_routes`. (3) Actual already matches desired → no call (idempotent). (4) WITHDRAW + observed `managed_routes` still present after mutation attempt → `dns_ha_agent_fail_open = 1`. (5) Observed Tailscale routes are never treated as desired state; only used to decide whether mutation is needed. (6) Changing `managed_routes` in config changes the desired set without any persisted-state migration. |
 | `HealthState` | Counters increment correctly; threshold transitions fire at right moments; snapshot is consistent under concurrent updates. |
-| `DnsProbe` | Mocked dnsjava Resolver: success on real IP, failure on NXDOMAIN for resolve_name, failure on real IP for block_name, failure on timeout. |
-| `RouteStateStore` | Round-trip persistence; corrupted state file → safe default (empty). |
+| `DnsProbe` | Mocked dnsjava Resolver. (a) Resolve: passes if at least one `resolve_names` entry returns a real A; fails only if ALL entries fail. (b) Filter: passes if rcode is in `allowed_rcodes` AND, when NOERROR, every returned address is in `allowed_ips`; fails if any returned routable address is not allowed (real public IP is always a failure). (c) Failure on timeout. (d) Malformed `block_expectation` config → ConfigLoader exits 78. |
+| `BackendProbe` | Same as `DnsProbe` but targeted at each configured backend address; failures do NOT influence FSM. |
 | `CliTailscaleClient` | Subprocess invocation arguments correct; non-zero exit → exception; timeout → exception. (Uses an interface-mocked `ProcessBuilder`-equivalent.) |
 
 ### Integration tests (Testcontainers)
@@ -761,10 +877,11 @@ FROM eclipse-temurin:21-jre-jammy
 ARG TARGETARCH
 ARG TAILSCALE_VERSION=1.74.0
 
-# Install tailscale CLI (for subprocess invocations) and wget for the HEALTHCHECK.
-# We deliberately keep wget in the final image so the HEALTHCHECK below works;
-# curl is used only at build time and is purged after the Tailscale tarball is
-# extracted to keep the runtime image lean.
+# Install tailscale CLI (for subprocess invocations) and wget.
+# wget is kept in the final image because the Ansible-rendered Compose-level
+# healthcheck invokes `wget -qO- http://<tailscale_ip>:8091/health`. curl is
+# only needed at build time to fetch the Tailscale tarball, and is purged
+# afterwards to keep the runtime image lean.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl wget ca-certificates && \
     case "$TARGETARCH" in \
@@ -784,13 +901,22 @@ WORKDIR /app
 COPY --from=build /build/build/libs/dns-ha-agent.jar /app/dns-ha-agent.jar
 COPY config/example.yaml /etc/dns-ha-agent/example.yaml
 
-# Container HEALTHCHECK is DIAGNOSTIC ONLY — visible in `docker ps`, scraped by
-# monitoring. It does NOT trigger restarts (Docker/Compose does not auto-restart
-# on unhealthy alone). Recovery from hangs comes from the agent self-exiting
-# via its internal WatchdogThread, plus `restart: unless-stopped`.
-# wget is used instead of curl because curl is purged above to slim the image.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
-    CMD wget -qO- http://localhost:8091/health > /dev/null || exit 1
+# NO Dockerfile-level HEALTHCHECK.
+#
+# The agent binds /health to the node's Tailscale IP (NOT 0.0.0.0), so the
+# bind address is not known at image-build time and a localhost healthcheck
+# would always fail. The HEALTHCHECK is defined in the Ansible-rendered
+# docker-compose.yml instead, where the Tailscale IP can be templated in:
+#
+#   healthcheck:
+#     test: ["CMD", "wget", "-qO-",
+#            "http://{{ ansible_tailscale0.ipv4.address }}:8091/health"]
+#
+# See §11 docker-compose snippet below and §14 ansible role.
+# Reminder: HEALTHCHECK is DIAGNOSTIC ONLY — visible in `docker ps`, scraped
+# by monitoring. It does NOT trigger restarts (Docker/Compose does not
+# auto-restart on unhealthy alone). Recovery from hangs comes from the
+# agent self-exiting via its internal WatchdogThread + `restart: unless-stopped`.
 
 EXPOSE 8091
 ENTRYPOINT ["java", "-jar", "/app/dns-ha-agent.jar", "--config", "/etc/dns-ha-agent/config.yaml"]
@@ -813,6 +939,13 @@ services:
     container_name: dns-ha-agent
     restart: unless-stopped
     network_mode: host
+    environment:
+      # Make the LocalAPI socket path explicit. The `tailscale` CLI defaults to
+      # /var/run/tailscale/tailscaled.sock, but Tailscale's official Docker image
+      # exposes TS_SOCKET for this purpose and setting it documents intent —
+      # anyone reading the compose file can see at a glance that the in-container
+      # CLI is talking to the host's tailscaled via that socket.
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
     volumes:
       - /etc/dns-ha-agent/config.yaml:/etc/dns-ha-agent/config.yaml:ro
       - /var/lib/dns-ha-agent:/var/lib/dns-ha-agent
@@ -820,13 +953,24 @@ services:
       # via its LocalAPI Unix socket. `network_mode: host` does NOT expose the
       # host filesystem socket — without this explicit mount, every
       # `tailscale set --advertise-routes=...` invocation will fail and the
-      # agent will not be able to perform its core function.
+      # agent will not be able to perform its core function. The TS_SOCKET env
+      # var above points the CLI at this exact path.
       - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: '0.5'
+    # HEALTHCHECK lives here (not in the Dockerfile) because the agent binds
+    # to the node's Tailscale IP and that IP isn't known at image-build time.
+    # Ansible renders {{ tailscale_ip }} per-node from ansible_tailscale0.
+    # Diagnostic only — does NOT trigger restart; see WatchdogThread.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://{{ tailscale_ip }}:8091/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
     logging:
       driver: json-file
       options:
@@ -915,16 +1059,60 @@ jobs:
     needs: build-and-push
     runs-on: docker
     steps:
+      - uses: actions/checkout@v4
+      - name: Render smoke-test config
+        run: |
+          # CI has no Tailscale interface, so bind to 127.0.0.1 and use the
+          # test-only tailscale.mode=noop path (allowed because the
+          # DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE env var is set below).
+          cat > test-config.yaml <<'EOF'
+          version: 1
+          node: { name: smoke, region: ci, vip: 10.253.53.53/32 }
+          probe:
+            target: 10.253.53.53
+            resolve_names: [cloudflare.com]
+            resolve_type: A
+            block_name: dns-filter-sentinel.example
+            block_expectation:
+              mode: must_not_return_real_ip
+              allowed_rcodes: [NXDOMAIN, REFUSED, NOERROR]
+              allowed_ips: ["0.0.0.0"]
+            interval: 2s
+            query_timeout: 2s
+            fail_threshold: 2
+            success_threshold: 3
+          peers: []
+          split_brain: { enabled: false }
+          tailscale:
+            mode: noop
+            cli_path: /usr/bin/tailscale
+            managed_routes: [10.253.53.53/32]
+            preserved_routes: []
+            command_timeout: 10s
+          http: { bind_address: 127.0.0.1, port: 8091 }
+          logging: { format: JSON, level: INFO }
+          metrics: { enabled: true, path: /metrics }
+          EOF
       - name: Pull and smoke-test (by digest)
         run: |
           DIGEST="${{ needs.build-and-push.outputs.digest }}"
           IMAGE="forgejo.homelab.internal/homelab/dns-ha-agent@${DIGEST}"
           docker pull "${IMAGE}"
           docker run -d --name smoke --rm \
-            -v ./test-config.yaml:/etc/dns-ha-agent/config.yaml \
+            --network host \
+            -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true \
+            -v "${PWD}/test-config.yaml:/etc/dns-ha-agent/config.yaml" \
             "${IMAGE}"
-          sleep 30
-          curl -fsS http://localhost:8091/health
+          # Poll /health with retry rather than a flat sleep — the agent
+          # binds and starts the HTTP server in well under 5s, but startup
+          # variance can occasionally push past a fixed 30s sleep.
+          for i in $(seq 1 12); do
+            sleep 2
+            if wget -qO- http://127.0.0.1:8091/health > /tmp/health.json; then
+              break
+            fi
+          done
+          jq . /tmp/health.json
           docker stop smoke
 ```
 
@@ -983,6 +1171,18 @@ dns_ha_agent_node_region: ""        # MUST set in host_vars
 dns_ha_agent_vip: "10.253.53.53/32"
 dns_ha_agent_peers: []              # MUST set in host_vars
 dns_ha_agent_http_port: 8091
+
+# Probe schema settings. The defaults are good for most deployments.
+# `dns_ha_agent_filter_sentinel` MUST be set group-wide and must match the
+# sentinel A record + AGH block rule from `../PHASES.md` Phase 0.
+dns_ha_agent_resolve_names:
+  - cloudflare.com
+  - example.com
+dns_ha_agent_filter_sentinel: ""    # MUST set in group_vars (e.g. "dns-filter-sentinel.example.com")
+
+# Routes the agent is allowed to manage / must preserve. v1 defaults match
+# the VIP; preserved_routes is a per-host safety hatch.
+dns_ha_agent_preserved_routes: []
 ```
 
 ### `tasks/main.yml`
@@ -996,6 +1196,15 @@ dns_ha_agent_http_port: 8091
       - dns_ha_agent_image_digest is match("^sha256:[a-f0-9]{64}$")
     fail_msg: >
       dns_ha_agent_image_digest must be set to a sha256:... digest.
+
+- name: Assert filter sentinel is configured (must match Phase 0 setup)
+  assert:
+    that:
+      - dns_ha_agent_filter_sentinel is defined
+      - dns_ha_agent_filter_sentinel | length > 0
+    fail_msg: >
+      dns_ha_agent_filter_sentinel must be set to a real public DNS name
+      that is blocked by AGH (see ../PHASES.md Phase 0).
 
 - name: Ensure config directory exists
   file:
@@ -1056,9 +1265,20 @@ node:
 
 probe:
   target: {{ dns_ha_agent_vip | regex_replace('/.*$', '') }}
-  resolve_name: cloudflare.com
+  resolve_names:
+{% for name in dns_ha_agent_resolve_names | default(['cloudflare.com', 'example.com']) %}
+    - {{ name }}
+{% endfor %}
   resolve_type: A
-  block_name: dns-filter-sentinel.<your-public-domain>
+  block_name: {{ dns_ha_agent_filter_sentinel }}
+  block_expectation:
+    mode: must_not_return_real_ip
+    allowed_rcodes:
+      - NXDOMAIN
+      - REFUSED
+      - NOERROR
+    allowed_ips:
+      - "0.0.0.0"
   interval: 2s
   query_timeout: 2s
   fail_threshold: 2
@@ -1080,7 +1300,9 @@ split_brain:
 tailscale:
   mode: cli
   cli_path: /usr/bin/tailscale
-  preserved_routes: []
+  managed_routes:
+    - {{ dns_ha_agent_vip }}
+  preserved_routes: {{ dns_ha_agent_preserved_routes | default([]) | to_json }}
   command_timeout: 10s
 
 http:
@@ -1232,12 +1454,20 @@ n8n must not depend solely on `dns_ha_agent_fail_open`, because a dead agent can
 for each edge every 30s:
   health    = GET http://<edge-ts-ip>:8091/health  # may fail
   metrics   = GET http://<edge-ts-ip>:8091/metrics # may fail
-  dns_check = dig @<edge-ts-ip> -p 5353 cloudflare.com
-  block_chk = dig @<edge-ts-ip> -p 5353 dns-filter-sentinel.<your-public-domain>
+
+  # PRIMARY external signal — full dnsdist → AGH → Unbound path
+  # via this edge's dnsdist diagnostic listener on :1053.
+  dns_check = dig @<edge-ts-ip> -p 1053 cloudflare.com
+  block_chk = dig @<edge-ts-ip> -p 1053 dns-filter-sentinel.<your-public-domain>
+
+  # SECONDARY diagnostic — AGH-only path on :5353.
+  # Not the fencing signal: dnsdist down + AGH up still needs fencing.
+  agh_check = dig @<edge-ts-ip> -p 5353 cloudflare.com
+
   route     = tailscale_api route state for edge + 10.253.53.53/32
 
   if route.enabled
-     and external DNS/filtering check is unhealthy
+     and dns_check is unhealthy           # the :1053 result, not :5353
      and (fail_open(metrics) == 1
           or agent unreachable for >60s
           or quorum peers report edge unhealthy)
