@@ -1,2 +1,18 @@
 .DS_Store
 .idea/
+
+# dns-ha-agent (Java/Gradle)
+dns-ha-agent/.gradle/
+dns-ha-agent/build/
+dns-ha-agent/out/
+dns-ha-agent/*.iml
+!dns-ha-agent/gradle/wrapper/gradle-wrapper.jar
+__pycache__/
+*.pyc
+
+# Leftover sandbox-artifact probe files from a session where file deletion
+# was unavailable in the mounted workspace (see dns-ha-agent/PROGRESS.md
+# 2026-07-20 entry) — harmless, not deliverables, left in place because
+# they could not be removed.
+_probe_delete.txt
+dns-ha-agent/_probe_delete2.txt

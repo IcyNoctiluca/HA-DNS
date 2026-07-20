@@ -1,0 +1,83 @@
+name: build
+
+# Phase 0/1 skeleton: unit tests + local docker build smoke check.
+# Phase 5 adds: multi-arch buildx, registry push, digest-pinned smoke test,
+# per BLUEPRINT.md §12. Do not add registry publish steps before Phase 5 —
+# CI secrets (FORGEJO_REGISTRY_USER/TOKEN) are not configured until then.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: docker
+    container:
+      image: eclipse-temurin:21-jdk-jammy
+    defaults:
+      run:
+        working-directory: dns-ha-agent
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run unit tests (./gradlew check)
+        run: ./gradlew --no-daemon check
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-reports
+          path: dns-ha-agent/build/reports/tests/
+
+  docker-build:
+    needs: test
+    runs-on: docker
+    defaults:
+      run:
+        working-directory: dns-ha-agent
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t dns-ha-agent:ci .
+      - name: Smoke test — container starts and reaches STARTING state
+        run: |
+          # From Phase 1 onward, App.java is a long-lived service (probe
+          # loop), not a banner-and-exit stub, so this just proves the image
+          # boots and logs a startup line before we tear it down. The
+          # digest-pinned /health-based smoke test lands in Phase 5.
+          cat > /tmp/ci-config.yaml <<'CFG'
+          version: 1
+          node: { name: ci-smoke, region: ci, vip: 10.253.53.53/32 }
+          probe:
+            target: 10.253.53.53
+            resolve_names: [cloudflare.com]
+            resolve_type: A
+            block_name: dns-filter-sentinel.example
+            block_expectation:
+              mode: must_not_return_real_ip
+              allowed_rcodes: [NXDOMAIN, REFUSED, NOERROR]
+              allowed_ips: ["0.0.0.0"]
+            interval: 2s
+            query_timeout: 2s
+            fail_threshold: 2
+            success_threshold: 3
+          peers: []
+          split_brain: { enabled: false }
+          tailscale:
+            mode: noop
+            cli_path: /usr/bin/tailscale
+            managed_routes: [10.253.53.53/32]
+            preserved_routes: []
+            command_timeout: 10s
+          http: { bind_address: 127.0.0.1, port: 8091 }
+          logging: { format: JSON, level: INFO }
+          metrics: { enabled: true, path: /metrics }
+          CFG
+          docker run -d --name ci-smoke --rm \
+            -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true \
+            -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml \
+            dns-ha-agent:ci
+          sleep 5
+          docker logs ci-smoke
+          docker stop ci-smoke

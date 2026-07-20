@@ -8,7 +8,7 @@
 
 **Current phase**: Pre-Phase 1 (design complete, awaiting dns-ha-agent v1.0)
 
-**Blockers**: `dns-ha-agent` is unimplemented. See [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md).
+**Blockers**: `dns-ha-agent` is unimplemented and unverified. See [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md) and [`dns-ha-agent/PROGRESS.md`](dns-ha-agent/PROGRESS.md) — Phase 0 + Phase 1 code has been written (2026-07-20) but has never been compiled, tested, or built (no JDK 21/Gradle/Docker were available in that session). It needs a real build before it can be trusted as "implemented."
 
 ---
 
