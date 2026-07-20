@@ -34,6 +34,18 @@ public final class Reconciler {
 
     private volatile Instant failOpenSince;
 
+    /**
+     * Diagnostic-only cache of the last actually-observed advertised-routes
+     * set, updated every reconcile() cycle. NOT a RouteStateStore (AGENTS.md
+     * invariant #3 forbids persisting route *intent*) — this is in-memory
+     * only, reset on restart, and never consulted to decide what to
+     * advertise; it exists purely so HealthResource (Phase 2 /health) can
+     * report vip_advertised without shelling out to `tailscale` on every
+     * HTTP request (mirrors the "/metrics never triggers probes on demand"
+     * principle in AGENTS.md).
+     */
+    private volatile Set<String> lastObservedAdvertised = Set.of();
+
     public Reconciler(TailscaleClient client, Metrics metrics, Config config) {
         this.client = client;
         this.metrics = metrics;
@@ -48,6 +60,7 @@ public final class Reconciler {
         Set<String> actual;
         try {
             actual = client.currentlyAdvertised();
+            lastObservedAdvertised = actual;
         } catch (TailscaleException e) {
             // Can't safely tell what's actually advertised; skip mutation
             // this cycle rather than guess. Next probe cycle retries.
@@ -86,6 +99,7 @@ public final class Reconciler {
         Set<String> postActual;
         try {
             postActual = client.currentlyAdvertised();
+            lastObservedAdvertised = postActual;
         } catch (TailscaleException e) {
             log.error("tailscale_observe_failed_post_mutation",
                 kv("node", config.node().name()), kv("error", e.getMessage()));
@@ -94,6 +108,8 @@ public final class Reconciler {
             // Treat conservatively as fail-open if we were trying to withdraw.
             postActual = managed;
         }
+
+        metrics.vipAdvertised.set(postActual.contains(config.node().vip()) ? 1 : 0);
 
         boolean failOpen = decision == Decision.WITHDRAW && managed.stream().anyMatch(postActual::contains);
 
@@ -114,6 +130,16 @@ public final class Reconciler {
 
     public boolean isFailOpen() {
         return failOpenSince != null;
+    }
+
+    /**
+     * Last actually-observed advertised-routes set, as of the most recent
+     * reconcile() cycle. Diagnostic only — see the field's javadoc. Before
+     * the first reconcile() call (e.g. very early in STARTING before the
+     * first probe cycle completes), returns an empty set.
+     */
+    public Set<String> lastObservedAdvertised() {
+        return lastObservedAdvertised;
     }
 
     private static Set<String> union(Set<String> a, Set<String> b) {

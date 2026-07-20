@@ -100,6 +100,18 @@ public final class HealthState {
         });
     }
 
+    /**
+     * Records the outcome of one BackendProbe cycle for a single AGH
+     * backend (Phase 2). Deliberately does NOT run FsmReducer — backend
+     * probe results never drive FSM transitions or route decisions (see
+     * BackendProbe's javadoc "IMPORTANT non-effect" and PHASES.md Phase 2
+     * acceptance criteria "BackendProbe does not drive FSM").
+     */
+    public void recordBackendProbeResult(String name, String address, boolean resolveOk, boolean filterOk) {
+        BackendProbeResult result = new BackendProbeResult(name, address, Instant.now(), resolveOk, filterOk);
+        update(prev -> prev.withBackendResult(result));
+    }
+
     public FsmState currentState() {
         return ref.get().fsmState();
     }

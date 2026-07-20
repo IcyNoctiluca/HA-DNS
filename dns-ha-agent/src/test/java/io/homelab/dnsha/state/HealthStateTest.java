@@ -97,6 +97,47 @@ class HealthStateTest {
     }
 
     @Test
+    void recordBackendProbeResultDoesNotAffectFsmState() {
+        HealthState state = new HealthState(CONFIG);
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1)); // -> HEALTHY
+        assertThat(state.currentState()).isEqualTo(FsmState.HEALTHY);
+
+        // A backend probe failure must never move the FSM — see
+        // BackendProbe's javadoc "IMPORTANT non-effect".
+        state.recordBackendProbeResult("agh-iom-01", "100.64.1.2:5353", false, false);
+
+        assertThat(state.currentState()).isEqualTo(FsmState.HEALTHY);
+    }
+
+    @Test
+    void recordBackendProbeResultIsTrackedByName() {
+        HealthState state = new HealthState(CONFIG);
+
+        state.recordBackendProbeResult("agh-ams-01", "127.0.0.1:5353", true, true);
+        state.recordBackendProbeResult("agh-iom-01", "100.64.1.2:5353", true, false);
+
+        var backends = state.snapshot().backendResults();
+        assertThat(backends).hasSize(2);
+        assertThat(backends.get("agh-ams-01").resolveOk()).isTrue();
+        assertThat(backends.get("agh-ams-01").filterOk()).isTrue();
+        assertThat(backends.get("agh-iom-01").filterOk()).isFalse();
+    }
+
+    @Test
+    void recordBackendProbeResultOverwritesPreviousResultForSameName() {
+        HealthState state = new HealthState(CONFIG);
+
+        state.recordBackendProbeResult("agh-ams-01", "127.0.0.1:5353", true, true);
+        state.recordBackendProbeResult("agh-ams-01", "127.0.0.1:5353", false, false);
+
+        var backends = state.snapshot().backendResults();
+        assertThat(backends).hasSize(1);
+        assertThat(backends.get("agh-ams-01").resolveOk()).isFalse();
+    }
+
+    @Test
     void snapshotIsConsistentUnderConcurrentUpdates() throws InterruptedException {
         HealthState state = new HealthState(CONFIG);
         int threads = 8;

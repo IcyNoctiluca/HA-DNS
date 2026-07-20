@@ -1,10 +1,14 @@
 package io.homelab.dnsha;
 
+import io.homelab.dnsha.config.BackendConfig;
 import io.homelab.dnsha.config.Config;
 import io.homelab.dnsha.config.ConfigException;
 import io.homelab.dnsha.config.ConfigLoader;
 import io.homelab.dnsha.decide.Decision;
+import io.homelab.dnsha.http.HealthServer;
 import io.homelab.dnsha.metrics.Metrics;
+import io.homelab.dnsha.probe.BackendProbe;
+import io.homelab.dnsha.probe.BackendProbeLoop;
 import io.homelab.dnsha.probe.DnsProbe;
 import io.homelab.dnsha.probe.ProbeLoop;
 import io.homelab.dnsha.state.HealthState;
@@ -18,17 +22,22 @@ import org.slf4j.LoggerFactory;
 import static net.logstash.logback.argument.StructuredArguments.kv;
 
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 /**
  * Entry point. Loads config, wires components, runs the probe loop.
  * See BLUEPRINT.md §8 Operational Behaviour, §9 Implementation.
  *
- * Phase 1 scope: no HTTP server (Phase 2), no peer monitor (Phase 3), no
- * WatchdogThread / hardened startup reconciliation / graceful SIGTERM
- * handling (Phase 4 — this class has a minimal best-effort shutdown hook
- * only, noted below). The agent is fully functional via logs alone per
- * PHASES.md Phase 1 acceptance criteria.
+ * As of Phase 2: wires up HealthServer (/health, /metrics) and, when
+ * backend_probe.enabled, one BackendProbeLoop virtual thread per configured
+ * backend. Still no peer monitor (Phase 3), no WatchdogThread / hardened
+ * startup reconciliation / graceful SIGTERM handling (Phase 4 — this class
+ * has a minimal best-effort shutdown hook only, noted below). The agent is
+ * fully functional via logs + /health + /metrics per PHASES.md Phase 1/2
+ * acceptance criteria.
  */
 public final class App {
 
@@ -63,7 +72,13 @@ public final class App {
         Reconciler reconciler = new Reconciler(tailscaleClient, metrics, config);
         HealthState healthState = new HealthState(config);
         DnsProbe probe = new DnsProbe(config.probe());
-        ProbeLoop probeLoop = new ProbeLoop(probe, healthState, config, reconciler);
+        ProbeLoop probeLoop = new ProbeLoop(probe, healthState, config, reconciler, metrics);
+
+        List<BackendProbeLoop> backendProbeLoops = startBackendProbeLoops(config, healthState, metrics);
+
+        Instant startedAt = Instant.now();
+        HealthServer healthServer = new HealthServer(config, healthState, reconciler, metrics, startedAt);
+        healthServer.start();
 
         // Minimal best-effort shutdown path. This is NOT the hardened
         // graceful-SIGTERM handler from BLUEPRINT.md §8 (transition to
@@ -77,6 +92,12 @@ public final class App {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("shutdown_hook_running", kv("node", config.node().name()));
             probeLoop.stop();
+            backendProbeLoops.forEach(BackendProbeLoop::stop);
+            try {
+                healthServer.stop();
+            } catch (RuntimeException e) {
+                log.error("shutdown_hook_health_server_stop_failed", kv("error", e.toString()));
+            }
             try {
                 reconciler.reconcile(Decision.WITHDRAW);
             } catch (RuntimeException e) {
@@ -89,6 +110,30 @@ public final class App {
         log.info("dns_ha_agent_started", kv("node", config.node().name()));
 
         awaitForever();
+    }
+
+    /**
+     * One virtual thread per configured backend (PHASES.md Phase 2: "One
+     * virtual thread per backend"). No-op (returns an empty list) if
+     * backend_probe.enabled is false or no backends are configured — this
+     * is the expected default (config/example.yaml ships with
+     * backend_probe.enabled: false until an operator wires in real AGH
+     * backend addresses).
+     */
+    private static List<BackendProbeLoop> startBackendProbeLoops(Config config, HealthState healthState, Metrics metrics) {
+        List<BackendProbeLoop> loops = new ArrayList<>();
+        if (!config.backendProbe().enabled() || config.backendProbe().backends().isEmpty()) {
+            log.info("backend_probe_disabled", kv("node", config.node().name()));
+            return loops;
+        }
+        for (BackendConfig backend : config.backendProbe().backends()) {
+            BackendProbe backendProbe = new BackendProbe(backend, config.probe(), config.backendProbe().queryTimeout());
+            BackendProbeLoop loop = new BackendProbeLoop(
+                backendProbe, healthState, config.backendProbe(), metrics, config.node().name());
+            Thread.ofVirtual().name("backend-probe-" + backend.name()).start(loop);
+            loops.add(loop);
+        }
+        return loops;
     }
 
     private static TailscaleClient createTailscaleClient(Config config, boolean allowNoopFlag)

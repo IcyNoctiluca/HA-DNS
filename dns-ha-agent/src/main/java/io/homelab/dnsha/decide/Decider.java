@@ -35,7 +35,17 @@ public final class Decider {
     }
 
     public static Decision decide(HealthState state, Config config) {
-        return decide(state, config, () -> Files.exists(DEFAULT_FORCE_WITHDRAW_PATH));
+        return decide(state, config, Decider::isForceWithdrawActive);
+    }
+
+    /**
+     * Exposed so HealthResource (Phase 2 /health) can report
+     * `force_withdraw_active` using the exact same check Decider itself
+     * uses to make the WITHDRAW decision, rather than duplicating the path
+     * constant and risking the two drifting apart.
+     */
+    public static boolean isForceWithdrawActive() {
+        return Files.exists(DEFAULT_FORCE_WITHDRAW_PATH);
     }
 
     /**

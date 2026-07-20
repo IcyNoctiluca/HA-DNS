@@ -48,13 +48,24 @@ probe:
   fail_threshold: 2
   success_threshold: 3
 
-# Per-backend filter probes (Phase 2). Safe to leave enabled: false until
-# BackendProbe is implemented — the field is parsed but unused before then.
+# Per-backend filter probes (Phase 2). Results feed /health.backends[] and
+# the dns_ha_agent_backend_* metrics ONLY — they never affect the FSM or
+# route-mutation decision (see BLUEPRINT.md §6, PHASES.md Phase 2). One
+# virtual thread per configured backend. Address is "host:port" (AGH
+# backends listen on a non-standard DNS port, unlike probe.target which is
+# the VIP on port 53 via dnsdist); a bare host with no ":port" defaults to
+# port 53.
 backend_probe:
   enabled: false
   interval: 30s
   query_timeout: 2s
   backends: []
+  # Example (uncomment and adjust once real AGH backend addresses are known):
+  # backends:
+  #   - name: agh-ams-01
+  #     address: "127.0.0.1:5353"
+  #   - name: agh-iom-01
+  #     address: "100.64.x.y:5353"
 
 # Peer agents — for split-brain detection (Phase 3). Empty list disables
 # peer monitoring entirely.

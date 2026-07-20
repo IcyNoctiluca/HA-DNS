@@ -3,6 +3,7 @@ package io.homelab.dnsha.probe;
 import io.homelab.dnsha.config.Config;
 import io.homelab.dnsha.decide.Decider;
 import io.homelab.dnsha.decide.Decision;
+import io.homelab.dnsha.metrics.Metrics;
 import io.homelab.dnsha.state.FsmState;
 import io.homelab.dnsha.state.HealthState;
 import io.homelab.dnsha.tailscale.Reconciler;
@@ -33,17 +34,19 @@ public final class ProbeLoop implements Runnable {
     private final HealthState state;
     private final Config config;
     private final Reconciler reconciler;
+    private final Metrics metrics;
 
     /** Last wall-clock time a probe cycle completed; read by WatchdogThread (Phase 4). */
     private final AtomicReference<Instant> lastCycleCompletedAt = new AtomicReference<>(Instant.now());
 
     private volatile boolean running = true;
 
-    public ProbeLoop(DnsProbe probe, HealthState state, Config config, Reconciler reconciler) {
+    public ProbeLoop(DnsProbe probe, HealthState state, Config config, Reconciler reconciler, Metrics metrics) {
         this.probe = probe;
         this.state = state;
         this.config = config;
         this.reconciler = reconciler;
+        this.metrics = metrics;
     }
 
     @Override
@@ -72,6 +75,9 @@ public final class ProbeLoop implements Runnable {
 
         ProbeOutcome outcome = probe.probe();
         state.recordProbeResult(outcome.resolveOk(), outcome.filterOk(), outcome.duration(), outcome.failureReason());
+
+        metrics.probeTotal.labels(outcome.success() ? "success" : "failure").inc();
+        metrics.probeDurationSeconds.observe(outcome.duration().toNanos() / 1_000_000_000.0);
 
         var probeResult = state.snapshot().lastProbeResult();
         if (outcome.success()) {
@@ -103,10 +109,27 @@ public final class ProbeLoop implements Runnable {
             }
         }
 
+        updateStateGauge(after);
+
         Decision decision = Decider.decide(state, config);
         reconciler.reconcile(decision);
 
         lastCycleCompletedAt.set(Instant.now());
+    }
+
+    /**
+     * dns_ha_agent_state is a gauge with one time series per label value
+     * (BLUEPRINT.md §6) — set the current state's series to 1 and every
+     * other tracked series to 0 so exactly one is ever "hot" at a time.
+     * SHUTTING_DOWN has no series of its own in the §6 spec; when active,
+     * all four tracked series read 0.
+     */
+    private void updateStateGauge(FsmState current) {
+        for (FsmState candidate : new FsmState[] {
+            FsmState.STARTING, FsmState.HEALTHY, FsmState.UNHEALTHY, FsmState.PARTITIONED
+        }) {
+            metrics.state.labels(candidate.name()).set(candidate == current ? 1 : 0);
+        }
     }
 
     public Instant lastCycleCompletedAt() {
