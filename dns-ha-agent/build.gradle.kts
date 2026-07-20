@@ -22,6 +22,7 @@ repositories {
 }
 
 dependencies {
+    implementation("org.glassfish.jersey.core:jersey-server:3.1.5")
     implementation("org.glassfish.jersey.containers:jersey-container-grizzly2-http:3.1.5")
     implementation("org.glassfish.jersey.inject:jersey-hk2:3.1.5")
     implementation("org.glassfish.jersey.media:jersey-media-json-jackson:3.1.5")

@@ -80,4 +80,14 @@ jobs:
             dns-ha-agent:ci
           sleep 5
           docker logs ci-smoke
+          # Phase 2: the CI config's http.bind_address is 127.0.0.1 (local-dev
+          # override — see config/example.yaml), so curl from INSIDE the
+          # container via `docker exec`, same as EndToEndIT's curlInContainer
+          # helper. This does not exercise the production Tailscale-IP bind
+          # path (that's Phase 7's job against a real deploy) — it only
+          # proves the HTTP server itself comes up and serves valid JSON.
+          docker exec ci-smoke wget -qO- http://127.0.0.1:8091/health | tee /tmp/ci-health.json
+          grep -q '"version"' /tmp/ci-health.json
+          docker exec ci-smoke wget -qO- http://127.0.0.1:8091/metrics | tee /tmp/ci-metrics.txt
+          grep -q '^dns_ha_agent_probe_total' /tmp/ci-metrics.txt
           docker stop ci-smoke

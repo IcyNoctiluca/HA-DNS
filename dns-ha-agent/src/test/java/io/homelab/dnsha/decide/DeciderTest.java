@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,7 +29,7 @@ class DeciderTest {
 
     private static HealthState fakeState(FsmState fsm, Set<PeerObservation> peers) {
         HealthState state = mock(HealthState.class);
-        HealthSnapshot snapshot = new HealthSnapshot(fsm, ProbeResult.initial(), peers, Instant.now());
+        HealthSnapshot snapshot = new HealthSnapshot(fsm, ProbeResult.initial(), peers, Map.of(), Instant.now());
         when(state.snapshot()).thenReturn(snapshot);
         return state;
     }
