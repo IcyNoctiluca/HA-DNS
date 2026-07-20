@@ -1,0 +1,103 @@
+# Example configuration for dns-ha-agent.
+# In production this file is rendered by the ansible role's config.yaml.j2
+# template (see ../ansible/roles/dns-ha-agent/, Phase 6). This copy is for
+# local development and as a reference baked into the container image at
+# /etc/dns-ha-agent/example.yaml.
+#
+# Full schema documented in ../BLUEPRINT.md §5.
+
+# Schema version. Increment on breaking changes.
+version: 1
+
+# This node's identity. Used in logs, metrics, /health output.
+node:
+  name: dns-ams-01
+  region: eu
+  # The VIP this node manages. Must match across the regional cluster.
+  vip: 10.253.53.53/32
+
+# Local DNS probing.
+probe:
+  # The DNS target the agent probes (the VIP, served by local dnsdist).
+  target: 10.253.53.53
+
+  # Names that MUST resolve to a real A record (resolve check).
+  # The check passes if AT LEAST ONE name returns a valid answer.
+  resolve_names:
+    - cloudflare.com
+    - example.com
+  resolve_type: A
+
+  # A name that MUST be blocked by AGH (filter check).
+  # See ../BLUEPRINT.md §5 for why this must be a real public A record
+  # behind an AGH block rule, not a made-up internal label.
+  block_name: dns-filter-sentinel.example.com
+
+  block_expectation:
+    mode: must_not_return_real_ip
+    allowed_rcodes:
+      - NXDOMAIN
+      - REFUSED
+      - NOERROR
+    allowed_ips:
+      - "0.0.0.0"
+
+  # Probe cadence and thresholds.
+  interval: 2s
+  query_timeout: 2s
+  fail_threshold: 2
+  success_threshold: 3
+
+# Per-backend filter probes (Phase 2). Safe to leave enabled: false until
+# BackendProbe is implemented — the field is parsed but unused before then.
+backend_probe:
+  enabled: false
+  interval: 30s
+  query_timeout: 2s
+  backends: []
+
+# Peer agents — for split-brain detection (Phase 3). Empty list disables
+# peer monitoring entirely.
+peers: []
+
+# Split-brain (partition) detection (Phase 3).
+split_brain:
+  enabled: false
+  peer_poll_interval: 15s
+  peer_poll_timeout: 5s
+  peer_unreachable_threshold: 60s
+  min_peer_reports_to_self_withdraw: 2
+
+# Tailscale interaction.
+tailscale:
+  # Production mode is `cli`. `noop` is test-only and requires
+  # DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true or --allow-noop-tailscale.
+  mode: cli
+  cli_path: /usr/bin/tailscale
+
+  # Routes this agent is ALLOWED to manage (advertise when HEALTHY,
+  # withdraw otherwise).
+  managed_routes:
+    - 10.253.53.53/32
+
+  # Routes that may already be advertised by the host and must NOT be wiped
+  # when the agent calls `tailscale set --advertise-routes=...`.
+  preserved_routes: []
+
+  # Timeout for tailscale set invocations.
+  command_timeout: 10s
+
+# HTTP server config (Phase 2). Bind to the node's Tailscale IP in
+# production, never 0.0.0.0 — see ../BLUEPRINT.md §5 and §6.
+http:
+  bind_address: "127.0.0.1"
+  port: 8091
+
+# Observability.
+logging:
+  format: JSON     # JSON or PLAIN. JSON for production.
+  level: INFO
+
+metrics:
+  enabled: true
+  path: /metrics
