@@ -17,3 +17,11 @@ __pycache__/
 _probe_delete.txt
 dns-ha-agent/_probe_delete2.txt
 .git-credentials
+
+# ansible-lint / ansible-galaxy local cache and collection-install scratch
+# dirs (created by running ansible-lint / ansible-galaxy collection install
+# locally or in a sandboxed session; not deliverables). Also could not be
+# `rm`'d in a prior sandboxed session (same workspace-mount permission gate
+# as above) — ignored rather than force-deleted.
+.ansible/
+dns-ha-agent/ansible/collections/

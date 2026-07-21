@@ -56,20 +56,20 @@
     src: config.yaml.j2
     dest: "{{ dns_ha_agent_config_dir }}/config.yaml"
     mode: '0644'
-  notify: restart dns-ha-agent
+  notify: Restart dns-ha-agent
 
 - name: Render docker-compose for agent (pinned by digest)
   template:
     src: docker-compose.yml.j2
     dest: "{{ dns_ha_agent_compose_dir }}/docker-compose.yml"
     mode: '0644'
-  notify: restart dns-ha-agent
+  notify: Restart dns-ha-agent
 
 - name: Pull pinned image by digest
   community.docker.docker_image:
     name: "{{ dns_ha_agent_image_repo }}@{{ dns_ha_agent_image_digest }}"
     source: pull
-  notify: restart dns-ha-agent
+  notify: Restart dns-ha-agent
 
 - name: Start dns-ha-agent
   community.docker.docker_compose_v2:

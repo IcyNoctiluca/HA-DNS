@@ -1,5 +1,6 @@
 ---
 galaxy_info:
+  author: homelab
   role_name: dns_ha_agent
   namespace: homelab
   description: >
