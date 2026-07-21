@@ -1,0 +1,24 @@
+# Local dev/build image ONLY — not used by CI and not the production image.
+# CI (.forgejo/workflows/build.yml) runs eclipse-temurin:21-jdk-jammy directly
+# and relies on the gradle wrapper; this image adds a full Gradle install on
+# top of the same base so a fresh checkout with no wrapper jar can still
+# bootstrap itself (see PROGRESS.md 2026-07-20: "gradle-wrapper.jar is
+# missing" — no sandboxed session has ever had network access to fetch it).
+#
+# Gradle version/URL intentionally read from gradle/wrapper/gradle-wrapper.properties
+# at build time so this can never drift from the version the project pins.
+FROM eclipse-temurin:21-jdk-jammy
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY gradle/wrapper/gradle-wrapper.properties /tmp/gradle-wrapper.properties
+RUN GRADLE_URL=$(grep '^distributionUrl=' /tmp/gradle-wrapper.properties | cut -d= -f2- | sed 's/\\//g') \
+    && echo "Installing Gradle from: ${GRADLE_URL}" \
+    && curl -fsSL -o /tmp/gradle.zip "${GRADLE_URL}" \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && rm /tmp/gradle.zip /tmp/gradle-wrapper.properties \
+    && ln -s /opt/gradle-*/bin/gradle /usr/local/bin/gradle
+
+WORKDIR /workspace
