@@ -65,11 +65,28 @@ class MetricsTest {
     }
 
     private static Set<String> collectorMetricNames(CollectorRegistry registry) {
+        // Union of family names AND individual sample names, not just family
+        // names. Prometheus simpleclient's Counter strips a trailing "_total"
+        // from the *family* name internally (OpenMetrics convention: the
+        // suffix belongs to the exposition layer, not the family identity)
+        // and only re-adds it on each emitted Sample. So for a Counter named
+        // "..._total" at build time, family.name comes back WITHOUT the
+        // suffix while sample.name has it back on — e.g.
+        // dns_ha_agent_probe_total registers as family "dns_ha_agent_probe"
+        // with a sample named "dns_ha_agent_probe_total". Checking only
+        // family names (as this test originally did) made every "_total"
+        // counter look unregistered even though /metrics renders it
+        // correctly (see MetricsResourceTest, which reads sample text and
+        // passes). Discovered by the first real test run of this file
+        // (2026-07-21) — see PROGRESS.md.
         Set<String> names = new HashSet<>();
         Enumeration<io.prometheus.client.Collector.MetricFamilySamples> families =
             registry.metricFamilySamples();
         for (var family : Collections.list(families)) {
             names.add(family.name);
+            for (var sample : family.samples) {
+                names.add(sample.name);
+            }
         }
         return names;
     }
