@@ -15,7 +15,11 @@ import static net.logstash.logback.argument.StructuredArguments.kv;
 
 import java.io.IOException;
 import java.net.URI;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Jersey-over-Grizzly HTTP server exposing /health and /metrics
@@ -67,6 +71,47 @@ public final class HealthServer {
         if (server.isStarted()) {
             server.shutdownNow();
             log.info("health_server_stopped", kv("bind_address", bindAddress), kv("port", port));
+        }
+    }
+
+    /**
+     * Phase 4 / BLUEPRINT.md §8 graceful-shutdown step 3: "Stop accepting
+     * new HTTP requests; allow in-flight to complete (with 2s deadline)."
+     * Unlike {@link #stop()} (immediate/forceful, used by the generic
+     * best-effort shutdown path and by tests), this stops accepting new
+     * connections immediately but gives in-flight requests up to
+     * {@code drainTimeout} to finish before forcing a stop.
+     *
+     * <p><b>Open question, flagged not guessed past</b> (same category as
+     * this class's other Grizzly-API assumption on the constructor's 5-arg
+     * {@code createHttpServer} overload): this calls
+     * {@code HttpServer#shutdown(long, TimeUnit)}, which per Grizzly's
+     * documented API returns a {@code GrizzlyFuture<HttpServer>} that
+     * completes once the grace period elapses or all in-flight requests
+     * finish, whichever is first. This session has no working compiler for
+     * this source (see PROGRESS.md) and could not verify the exact method
+     * signature/behaviour against a real build. If wrong, this is the one
+     * method designed to absorb that correction — falls back to the
+     * known-working {@link #stop()} forceful path on any failure so a bad
+     * assumption here degrades to "less graceful," not "shutdown hangs
+     * forever."
+     */
+    public void stopGracefully(Duration drainTimeout) {
+        if (!server.isStarted()) {
+            return;
+        }
+        try {
+            server.shutdown(drainTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                .get(drainTimeout.plus(Duration.ofSeconds(1)).toMillis(), TimeUnit.MILLISECONDS);
+            log.info("health_server_stopped_gracefully",
+                kv("bind_address", bindAddress), kv("port", port), kv("drain_timeout", drainTimeout.toString()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            server.shutdownNow();
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            log.error("health_server_graceful_shutdown_failed_falling_back_to_immediate",
+                kv("bind_address", bindAddress), kv("port", port), kv("error", e.toString()));
+            server.shutdownNow();
         }
     }
 }

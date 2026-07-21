@@ -174,6 +174,20 @@ public final class HealthState {
         update(prev -> prev.withBackendResult(result));
     }
 
+    /**
+     * Phase 4 — sets FsmState directly to SHUTTING_DOWN, bypassing
+     * FsmReducer (which never emits this state itself; see FsmReducer's
+     * javadoc). Called exactly once by the lifecycle/SIGTERM path
+     * (io.homelab.dnsha.lifecycle.GracefulShutdown) as the very first step
+     * of graceful shutdown, per BLUEPRINT.md §8 "Graceful shutdown" step 1.
+     * Idempotent: calling it again while already SHUTTING_DOWN is a no-op
+     * (FsmReducer's stickiness would keep it there anyway even without this
+     * guard, but the explicit check avoids a pointless atomic swap).
+     */
+    public void transitionToShuttingDown() {
+        update(prev -> prev.fsmState() == FsmState.SHUTTING_DOWN ? prev : prev.withFsmState(FsmState.SHUTTING_DOWN));
+    }
+
     public FsmState currentState() {
         return ref.get().fsmState();
     }
