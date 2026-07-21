@@ -7,6 +7,9 @@ import io.homelab.dnsha.config.ConfigLoader;
 import io.homelab.dnsha.config.PeerConfig;
 import io.homelab.dnsha.decide.Decision;
 import io.homelab.dnsha.http.HealthServer;
+import io.homelab.dnsha.lifecycle.GracefulShutdown;
+import io.homelab.dnsha.lifecycle.StartupReconciliation;
+import io.homelab.dnsha.lifecycle.WatchdogThread;
 import io.homelab.dnsha.metrics.Metrics;
 import io.homelab.dnsha.peer.PeerMonitor;
 import io.homelab.dnsha.probe.BackendProbe;
@@ -38,20 +41,30 @@ import java.util.concurrent.CountDownLatch;
  * backend. As of Phase 3: wires up one PeerMonitor virtual thread per
  * configured peer (config.peers() empty -> no threads started at all,
  * "single-node region" per BLUEPRINT.md §4 note 1 / PHASES.md Phase 3
- * "empty peer list disables peer monitoring entirely"). Still no
- * WatchdogThread / hardened startup reconciliation / graceful SIGTERM
- * handling (Phase 4 — this class has a minimal best-effort shutdown hook
- * only, noted below). The agent is fully functional via logs + /health +
- * /metrics per PHASES.md Phase 1/2/3 acceptance criteria.
+ * "empty peer list disables peer monitoring entirely"). As of Phase 4:
+ * performs hardened startup reconciliation (StartupReconciliation, BEFORE
+ * the probe/backend/peer loops start, per BLUEPRINT.md §8 step ordering),
+ * runs a WatchdogThread that force-exits on a hung probe loop or a failing
+ * HTTP self-check, and installs a GracefulShutdown SIGTERM handler for the
+ * hardened withdraw-with-confirmation + HTTP-drain sequence. The
+ * uncaught-exception handler now also force-exits (BLUEPRINT.md §8: "routes
+ * ... to logging + exit"), and the pre-Phase-4 minimal best-effort shutdown
+ * hook remains as a generic backstop for exit paths other than SIGTERM (see
+ * GracefulShutdown's javadoc for why the two are deliberately separate).
  */
 public final class App {
 
     private static final Logger log = LoggerFactory.getLogger(App.class);
     private static final Path DEFAULT_CONFIG_PATH = Path.of("/etc/dns-ha-agent/config.yaml");
 
+    /** BLUEPRINT.md §8: uncaught virtual-thread exceptions are logged + exit non-zero. Same code as WatchdogThread's hang-detection exit. */
+    private static final int EXIT_CODE_UNCAUGHT_EXCEPTION = 70; // EX_SOFTWARE
+
     public static void main(String[] args) {
-        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) ->
-            log.error("uncaught_exception", kv("thread", thread.getName()), kv("error", throwable.toString()), throwable));
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            log.error("uncaught_exception", kv("thread", thread.getName()), kv("error", throwable.toString()), throwable);
+            System.exit(EXIT_CODE_UNCAUGHT_EXCEPTION);
+        });
 
         try {
             run(args);
@@ -79,24 +92,55 @@ public final class App {
         DnsProbe probe = new DnsProbe(config.probe());
         ProbeLoop probeLoop = new ProbeLoop(probe, healthState, config, reconciler, metrics);
 
-        List<BackendProbeLoop> backendProbeLoops = startBackendProbeLoops(config, healthState, metrics);
-        List<PeerMonitor> peerMonitors = startPeerMonitors(config, healthState, metrics);
-
+        // BLUEPRINT.md §8 Startup step 3: HTTP server starts before
+        // reconciliation (step 4) and before any probe/peer loop (steps
+        // 5-6), so /health is reachable (reporting STARTING) throughout.
         Instant startedAt = Instant.now();
         HealthServer healthServer = new HealthServer(config, healthState, reconciler, metrics, startedAt);
         healthServer.start();
 
+        // Step 4: reconcile actual route state with desired state BEFORE
+        // any loop starts — a stale advertisement from a dead predecessor
+        // must never be inherited as "we're healthy" (Phase 4).
+        StartupReconciliation.reconcile(config, tailscaleClient, reconciler);
+
+        // Steps 5-6: probe loop + peer monitor loops. (Backend probe loops
+        // are a Phase 2 addition with no equivalent numbered BLUEPRINT.md
+        // §8 step; started alongside peer monitors, after reconciliation.)
+        // Probe loop thread starts here (not at the very end of this
+        // method as in Phase 1-3) so WatchdogThread, started right below,
+        // observes an already-running probe loop from the start rather
+        // than one whose thread hasn't been dispatched yet.
+        Thread.ofVirtual().name("probe-loop").start(probeLoop);
+        List<BackendProbeLoop> backendProbeLoops = startBackendProbeLoops(config, healthState, metrics);
+        List<PeerMonitor> peerMonitors = startPeerMonitors(config, healthState, metrics);
+
+        WatchdogThread watchdog = new WatchdogThread(probeLoop, config);
+        Thread.ofVirtual().name("watchdog").start(watchdog);
+
+        GracefulShutdown gracefulShutdown = new GracefulShutdown(
+            healthState, probeLoop, backendProbeLoops, peerMonitors, watchdog, healthServer, reconciler, config);
+        gracefulShutdown.install();
+
         // Minimal best-effort shutdown path. This is NOT the hardened
-        // graceful-SIGTERM handler from BLUEPRINT.md §8 (transition to
-        // SHUTTING_DOWN, wait up to 5s for withdraw confirmation, drain
-        // HTTP, exit 0) — that's Phase 4 scope (lifecycle/ShutdownHook).
-        // Attempting a withdraw here is strictly better than doing nothing
-        // on SIGTERM in the meantime, and does not weaken the fail-closed
+        // graceful-SIGTERM handler (GracefulShutdown, installed above) —
+        // it's a generic backstop for every OTHER exit path this class
+        // doesn't explicitly know about (WatchdogThread's forced
+        // System.exit(70) on a detected hang, the uncaught-exception
+        // handler's exit(70), a future exit call added elsewhere). It
+        // deliberately stays simple (single best-effort withdraw attempt,
+        // no 5s confirmation wait, no HTTP drain) so a forced hang-exit
+        // isn't delayed by the full graceful sequence — see
+        // GracefulShutdown's javadoc for the full reasoning on why the two
+        // paths are kept separate. Attempting a withdraw here is strictly
+        // better than doing nothing, and does not weaken the fail-closed
         // startup-reconciliation story: a new instance always re-validates
         // via STARTING before it will ADVERTISE again regardless of
         // whether this hook ran.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("shutdown_hook_running", kv("node", config.node().name()));
+            healthState.transitionToShuttingDown();
+            watchdog.stop();
             probeLoop.stop();
             backendProbeLoops.forEach(BackendProbeLoop::stop);
             peerMonitors.forEach(PeerMonitor::stop);
@@ -111,8 +155,6 @@ public final class App {
                 log.error("shutdown_hook_withdraw_failed", kv("error", e.toString()));
             }
         }, "shutdown-hook"));
-
-        Thread.ofVirtual().name("probe-loop").start(probeLoop);
 
         log.info("dns_ha_agent_started", kv("node", config.node().name()));
 
@@ -193,20 +235,6 @@ public final class App {
             new CountDownLatch(1).await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        }
-    }
-
-    /** Thrown for startup failures that are not config-parse errors (e.g. the noop-mode gate). */
-    static final class FatalStartupException extends Exception {
-        private final int exitCode;
-
-        FatalStartupException(String message, int exitCode) {
-            super(message);
-            this.exitCode = exitCode;
-        }
-
-        int exitCode() {
-            return exitCode;
         }
     }
 

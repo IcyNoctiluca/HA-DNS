@@ -30,6 +30,20 @@ public final class ProbeLoop implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(ProbeLoop.class);
 
+    /**
+     * PHASES.md Phase 4 acceptance criterion: "Integration test: inject
+     * Thread.sleep(Long.MAX_VALUE) into probe loop in a test build." This
+     * is that hook — gated behind an env var that must be explicitly set
+     * (same opt-in pattern as DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE), never
+     * read anywhere except here, and read once at class-load like every
+     * other startup-only config in this codebase. It exists purely so
+     * LifecycleIT can exercise WatchdogThread's hang-detection path against
+     * a real running agent process without needing to modify production
+     * code paths at runtime.
+     */
+    static final boolean TEST_HANG_PROBE_LOOP =
+        "true".equalsIgnoreCase(System.getenv("DNS_HA_AGENT_TEST_HANG_PROBE_LOOP"));
+
     private final DnsProbe probe;
     private final HealthState state;
     private final Config config;
@@ -52,6 +66,16 @@ public final class ProbeLoop implements Runnable {
     @Override
     public void run() {
         log.info("probe_loop_started", kv("node", config.node().name()), kv("interval", config.probe().interval().toString()));
+        if (TEST_HANG_PROBE_LOOP) {
+            log.warn("probe_loop_test_hang_injected", kv("node", config.node().name()),
+                kv("note", "DNS_HA_AGENT_TEST_HANG_PROBE_LOOP=true; lastCycleCompletedAt will never advance again"));
+            try {
+                Thread.sleep(Long.MAX_VALUE);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return;
+        }
         while (running) {
             try {
                 runOneCycle();

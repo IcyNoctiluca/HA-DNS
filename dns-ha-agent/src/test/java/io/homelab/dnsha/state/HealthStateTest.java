@@ -275,4 +275,50 @@ class HealthStateTest {
         assertThat(state.snapshot().lastProbeResult().consecutiveSuccesses()).isEqualTo(threads * perThread);
         assertThat(state.currentState()).isEqualTo(FsmState.HEALTHY);
     }
+
+    // --- Phase 4: transitionToShuttingDown ---
+
+    @Test
+    void transitionToShuttingDownSetsFsmStateDirectly() {
+        HealthState state = new HealthState(CONFIG);
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1)); // -> HEALTHY
+
+        state.transitionToShuttingDown();
+
+        assertThat(state.currentState()).isEqualTo(FsmState.SHUTTING_DOWN);
+    }
+
+    @Test
+    void transitionToShuttingDownIsStickyAgainstSubsequentProbeResults() {
+        // FsmReducer treats SHUTTING_DOWN as terminal/sticky (see its
+        // javadoc) -- this is the HealthState-level regression test for
+        // that contract, since GracefulShutdown stops the probe loop only
+        // AFTER calling transitionToShuttingDown(), so a probe cycle that
+        // was already in flight could race a recordProbeResult call in
+        // after SHUTTING_DOWN is set.
+        HealthState state = new HealthState(CONFIG);
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1)); // -> HEALTHY
+
+        state.transitionToShuttingDown();
+        assertThat(state.currentState()).isEqualTo(FsmState.SHUTTING_DOWN);
+
+        // A late-arriving in-flight probe result (success or failure) must
+        // not move the FSM away from SHUTTING_DOWN.
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        assertThat(state.currentState()).isEqualTo(FsmState.SHUTTING_DOWN);
+        state.recordProbeFailure("late in-flight failure");
+        assertThat(state.currentState()).isEqualTo(FsmState.SHUTTING_DOWN);
+    }
+
+    @Test
+    void transitionToShuttingDownCalledTwiceIsIdempotent() {
+        HealthState state = new HealthState(CONFIG);
+        state.transitionToShuttingDown();
+        state.transitionToShuttingDown();
+        assertThat(state.currentState()).isEqualTo(FsmState.SHUTTING_DOWN);
+    }
 }
