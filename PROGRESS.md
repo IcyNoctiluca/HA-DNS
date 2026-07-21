@@ -8,7 +8,7 @@
 
 **Current phase**: Pre-Phase 1 (design complete, awaiting dns-ha-agent v1.0)
 
-**Blockers**: `dns-ha-agent` is unimplemented (in the "never built" sense) and unverified. See [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md) and [`dns-ha-agent/PROGRESS.md`](dns-ha-agent/PROGRESS.md) — Phase 0, 1, and now 2 code has all been written (2026-07-20, across two sessions) but none of it has ever been compiled, tested, or built (no JDK 21/Gradle/Docker have been available in either session, and this session also confirmed the network allowlist blocks fetching a JDK/Gradle/Testcontainers-image dependencies directly as a workaround). It needs a real build before any of it can be trusted as "implemented."
+**Blockers**: `dns-ha-agent` is unimplemented (in the "never built" sense) and unverified. See [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md) and [`dns-ha-agent/PROGRESS.md`](dns-ha-agent/PROGRESS.md) — Phases 0 through 3 code has all been written (2026-07-20 and 2026-07-21, across three sessions) but none of it has ever been compiled, tested, or built. No session has had Gradle/Maven Central/Docker access; the 2026-07-21 session found a way to get a real JDK 21 *runtime* into the sandbox via `pip install jdk4py`, but that runtime has no `javac` (its `jdk.compiler` module is absent), so it does not unblock a real build. It needs a real build before any of it can be trusted as "implemented."
 
 ---
 
