@@ -1,5 +1,6 @@
 package io.homelab.dnsha.metrics;
 
+import io.prometheus.client.Collector;
 import io.prometheus.client.CollectorRegistry;
 import org.junit.jupiter.api.Test;
 
@@ -65,25 +66,42 @@ class MetricsTest {
     }
 
     private static Set<String> collectorMetricNames(CollectorRegistry registry) {
-        // Union of family names AND individual sample names, not just family
-        // names. Prometheus simpleclient's Counter strips a trailing "_total"
-        // from the *family* name internally (OpenMetrics convention: the
-        // suffix belongs to the exposition layer, not the family identity)
-        // and only re-adds it on each emitted Sample. So for a Counter named
-        // "..._total" at build time, family.name comes back WITHOUT the
-        // suffix while sample.name has it back on — e.g.
-        // dns_ha_agent_probe_total registers as family "dns_ha_agent_probe"
-        // with a sample named "dns_ha_agent_probe_total". Checking only
-        // family names (as this test originally did) made every "_total"
-        // counter look unregistered even though /metrics renders it
-        // correctly (see MetricsResourceTest, which reads sample text and
-        // passes). Discovered by the first real test run of this file
-        // (2026-07-21) — see PROGRESS.md.
+        // Reconstruct the real exposed name from family.type, not from
+        // samples. Prometheus simpleclient's Counter strips a trailing
+        // "_total" from the *family* name internally (OpenMetrics
+        // convention: the suffix belongs to the exposition layer, not the
+        // family identity) and only re-adds it on each emitted Sample — e.g.
+        // dns_ha_agent_probe_total registers as family "dns_ha_agent_probe".
+        //
+        // A first fix attempt (2026-07-21, see PROGRESS.md) unioned in
+        // sample.name alongside family.name, on the assumption a sample
+        // would always be there to carry the suffixed name. That's true for
+        // *unlabelled* counters only: SimpleCollector auto-creates a
+        // zero-value "no labels" child at construction time, so an unlabelled
+        // Counter has one sample immediately. But dns_ha_agent_probe_total,
+        // dns_ha_agent_route_mutations_total, and
+        // dns_ha_agent_backend_probe_total all declare labelNames(...), and
+        // labelled children are created lazily on first .labels(...) call —
+        // which nothing does at construction time. So those three still had
+        // zero samples, meaning neither family.name (stripped) nor any
+        // sample.name (none existed) carried the "_total" suffix, and the
+        // test still failed on exactly those three even after the first fix
+        // (confirmed by a second real ./gradlew check run, still 2026-07-21).
+        //
+        // Fixing this for real: reconstruct the exposed name from
+        // family.type instead, which is known at registration time
+        // regardless of whether any child/sample exists yet. This matches
+        // what MetricsResource/text-format rendering does for real request
+        // traffic (see MetricsResourceTest) without depending on a metric
+        // having been touched first.
         Set<String> names = new HashSet<>();
-        Enumeration<io.prometheus.client.Collector.MetricFamilySamples> families =
-            registry.metricFamilySamples();
+        Enumeration<Collector.MetricFamilySamples> families = registry.metricFamilySamples();
         for (var family : Collections.list(families)) {
-            names.add(family.name);
+            String exposedName =
+                family.type == Collector.Type.COUNTER && !family.name.endsWith("_total")
+                    ? family.name + "_total"
+                    : family.name;
+            names.add(exposedName);
             for (var sample : family.samples) {
                 names.add(sample.name);
             }
