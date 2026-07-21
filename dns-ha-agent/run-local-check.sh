@@ -30,19 +30,24 @@ mkdir -p build
 
 TASK="check"
 LOGFILE="build/local-check.log"
-EXTRA_MOUNTS=()
+# A string, not an array: macOS ships bash 3.2 as /bin/bash, which has a
+# known bug where "${arr[@]}" on an EMPTY array throws "unbound variable"
+# under `set -u`. Plain word-splitting on a plain string sidesteps it and
+# works identically on bash 3.2+ and 4+.
+EXTRA_MOUNT_ARGS=""
 
 if [ "${1:-}" = "integration" ]; then
   TASK="integrationTest"
   LOGFILE="build/local-integration-test.log"
-  EXTRA_MOUNTS=(-v /var/run/docker.sock:/var/run/docker.sock)
+  EXTRA_MOUNT_ARGS="-v /var/run/docker.sock:/var/run/docker.sock"
 fi
 
 echo "--- running ./gradlew --no-daemon ${TASK} ---"
+# shellcheck disable=SC2086  # intentional word-splitting, see EXTRA_MOUNT_ARGS comment above
 docker run --rm \
   -v "$PWD":/workspace \
   -v "${CACHE_VOLUME}":/root/.gradle \
-  "${EXTRA_MOUNTS[@]}" \
+  ${EXTRA_MOUNT_ARGS} \
   -w /workspace \
   "$IMAGE_TAG" \
   bash -c "
