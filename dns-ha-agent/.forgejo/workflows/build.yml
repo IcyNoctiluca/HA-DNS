@@ -1,9 +1,10 @@
 name: build
 
-# Phase 0/1 skeleton: unit tests + local docker build smoke check.
-# Phase 5 adds: multi-arch buildx, registry push, digest-pinned smoke test,
-# per BLUEPRINT.md §12. Do not add registry publish steps before Phase 5 —
-# CI secrets (FORGEJO_REGISTRY_USER/TOKEN) are not configured until then.
+# Phase 5 (BLUEPRINT.md §12): unit tests -> multi-arch build+push (main only)
+# -> digest-pinned smoke test. PRs get a fast single-arch local build+smoke
+# check instead of a real push, since registry secrets (FORGEJO_REGISTRY_USER/
+# FORGEJO_REGISTRY_TOKEN) are configured for this repo but a PR build must not
+# require write access to publish to be usable for review.
 
 on:
   push:
@@ -30,8 +31,12 @@ jobs:
           name: test-reports
           path: dns-ha-agent/build/reports/tests/
 
-  docker-build:
+  # PR-only: proves the image still builds and boots without needing registry
+  # credentials. Superseded by build-and-push + smoke-test on main, which pull
+  # the real pushed image by digest instead of building locally a second time.
+  pr-smoke-test:
     needs: test
+    if: github.event_name == 'pull_request'
     runs-on: docker
     defaults:
       run:
@@ -40,12 +45,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: docker build
         run: docker build -t dns-ha-agent:ci .
-      - name: Smoke test — container starts and reaches STARTING state
+      - name: Smoke test — container starts and serves /health, /metrics
         run: |
-          # From Phase 1 onward, App.java is a long-lived service (probe
-          # loop), not a banner-and-exit stub, so this just proves the image
-          # boots and logs a startup line before we tear it down. The
-          # digest-pinned /health-based smoke test lands in Phase 5.
           cat > /tmp/ci-config.yaml <<'CFG'
           version: 1
           node: { name: ci-smoke, region: ci, vip: 10.253.53.53/32 }
@@ -80,14 +81,126 @@ jobs:
             dns-ha-agent:ci
           sleep 5
           docker logs ci-smoke
-          # Phase 2: the CI config's http.bind_address is 127.0.0.1 (local-dev
-          # override — see config/example.yaml), so curl from INSIDE the
-          # container via `docker exec`, same as EndToEndIT's curlInContainer
-          # helper. This does not exercise the production Tailscale-IP bind
-          # path (that's Phase 7's job against a real deploy) — it only
-          # proves the HTTP server itself comes up and serves valid JSON.
+          # http.bind_address is 127.0.0.1 (local-dev override), so curl from
+          # INSIDE the container via `docker exec` — this does not exercise
+          # the production Tailscale-IP bind path (Phase 7's job against a
+          # real deploy), it only proves the HTTP server itself comes up.
           docker exec ci-smoke wget -qO- http://127.0.0.1:8091/health | tee /tmp/ci-health.json
           grep -q '"version"' /tmp/ci-health.json
           docker exec ci-smoke wget -qO- http://127.0.0.1:8091/metrics | tee /tmp/ci-metrics.txt
           grep -q '^dns_ha_agent_probe_total' /tmp/ci-metrics.txt
           docker stop ci-smoke
+
+  build-and-push:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: docker
+    defaults:
+      run:
+        working-directory: dns-ha-agent
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Forgejo registry
+        uses: docker/login-action@v3
+        with:
+          registry: forgejo.homelab.internal
+          username: ${{ secrets.FORGEJO_REGISTRY_USER }}
+          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+      - name: Build and push multi-arch
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: dns-ha-agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # :latest published as a convenience pointer ONLY.
+          # Ansible deploys pin by digest, not by :latest.
+          tags: |
+            forgejo.homelab.internal/homelab/dns-ha-agent:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Publish digest as build artifact
+        run: |
+          echo "Built digest: ${{ steps.push.outputs.digest }}"
+          echo "${{ steps.push.outputs.digest }}" > digest.txt
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: image-digest
+          path: dns-ha-agent/digest.txt
+
+  smoke-test:
+    needs: build-and-push
+    runs-on: docker
+    defaults:
+      run:
+        working-directory: dns-ha-agent
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render smoke-test config
+        run: |
+          # CI has no Tailscale interface, so bind to 127.0.0.1 and use the
+          # test-only tailscale.mode=noop path (allowed because the
+          # DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE env var is set below).
+          cat > test-config.yaml <<'EOF'
+          version: 1
+          node: { name: smoke, region: ci, vip: 10.253.53.53/32 }
+          probe:
+            target: 10.253.53.53
+            resolve_names: [cloudflare.com]
+            resolve_type: A
+            block_name: dns-filter-sentinel.example
+            block_expectation:
+              mode: must_not_return_real_ip
+              allowed_rcodes: [NXDOMAIN, REFUSED, NOERROR]
+              allowed_ips: ["0.0.0.0"]
+            interval: 2s
+            query_timeout: 2s
+            fail_threshold: 2
+            success_threshold: 3
+          peers: []
+          split_brain: { enabled: false }
+          tailscale:
+            mode: noop
+            cli_path: /usr/bin/tailscale
+            managed_routes: [10.253.53.53/32]
+            preserved_routes: []
+            command_timeout: 10s
+          http: { bind_address: 127.0.0.1, port: 8091 }
+          logging: { format: JSON, level: INFO }
+          metrics: { enabled: true, path: /metrics }
+          EOF
+      - name: Pull and smoke-test (by digest)
+        run: |
+          DIGEST="${{ needs.build-and-push.outputs.digest }}"
+          IMAGE="forgejo.homelab.internal/homelab/dns-ha-agent@${DIGEST}"
+          docker pull "${IMAGE}"
+          docker run -d --name smoke --rm \
+            --network host \
+            -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true \
+            -v "${PWD}/test-config.yaml:/etc/dns-ha-agent/config.yaml" \
+            "${IMAGE}"
+          # Poll /health with retry rather than a flat sleep — the agent
+          # binds and starts the HTTP server in well under 5s, but startup
+          # variance can occasionally push past a fixed 30s sleep.
+          status=1
+          for i in $(seq 1 12); do
+            sleep 2
+            if wget -qO- http://127.0.0.1:8091/health > /tmp/health.json; then
+              status=0
+              break
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "agent never became reachable on /health" >&2
+            docker logs smoke || true
+            docker stop smoke || true
+            exit 1
+          fi
+          jq . /tmp/health.json
+          grep -q '"version"' /tmp/health.json
+          docker stop smoke

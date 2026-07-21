@@ -1,0 +1,13 @@
+---
+# Example per-node inventory (BLUEPRINT.md §14). Committed as documentation —
+# not a real deploy target from this repo alone (real Tailscale IPs are
+# homelab-specific and not committed here).
+
+dns_ha_agent_node_region: eu
+dns_ha_agent_peers:
+  - name: dns-iom-01
+    tailscale_ip: 100.64.x.y
+  - name: dns-tor-01
+    tailscale_ip: 100.64.a.b
+  - name: dns-shz-01
+    tailscale_ip: 100.64.c.d
