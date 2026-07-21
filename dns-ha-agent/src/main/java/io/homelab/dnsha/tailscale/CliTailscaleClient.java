@@ -23,16 +23,30 @@ import java.util.stream.Collectors;
  * v1 deliberately uses subprocess rather than the LocalAPI unix socket
  * directly.
  *
- * OPEN QUESTION (flagged, not guessed past): currentlyAdvertised() reads
- * `tailscale debug prefs` and parses its "AdvertiseRoutes" JSON field.
- * `debug prefs` is a real, widely-relied-upon Tailscale CLI subcommand
- * that dumps ipn.Prefs as JSON, but it is explicitly undocumented/subject
- * to change, and this sandbox has no real `tailscale` binary or tailscaled
- * socket to verify actual output against. If this assumption is wrong,
- * dns_ha_agent_fail_open detection (Reconciler) could be inaccurate — the
- * single most dangerous failure class per BLUEPRINT.md §6. This needs
- * verification against a real tailscaled before Phase 7's production
- * acceptance gate; noted in PROGRESS.md.
+ * JSON SHAPE CONFIRMED AGAINST UPSTREAM SOURCE (2026-07-21, no compiler or
+ * real `tailscale` binary was available in that sandbox either, so this was
+ * verified by reading tailscale/tailscale's actual Go source on GitHub
+ * rather than running it — see PROGRESS.md for the session that did this):
+ * currentlyAdvertised() reads `tailscale debug prefs` and parses its
+ * "AdvertiseRoutes" JSON field. `cmd/tailscale/cli/debug.go` confirms
+ * `debug prefs` is a real subcommand (`Name: "prefs", ... Exec: runPrefs`)
+ * whose non-pretty path does exactly `json.MarshalIndent(prefs, "", "\t")`
+ * on the `*ipn.Prefs` struct returned by `localClient.GetPrefs(ctx)`.
+ * `ipn/prefs.go`'s `Prefs.AdvertiseRoutes []netip.Prefix` field has no
+ * custom json tag and no `omitempty`, so it always serializes under the
+ * literal key `"AdvertiseRoutes"` — confirming this code's field name is
+ * correct — and, being a nil slice when no routes are advertised (no
+ * `omitempty`), serializes as JSON `null` rather than being omitted,
+ * matching this method's existing `routesNode.isNull()` → `Set.of()`
+ * handling. Individual `netip.Prefix` entries marshal as CIDR strings
+ * (e.g. "10.253.53.53/32") via their own `MarshalText`, matching
+ * `n.asText()` below. `debug prefs` is still explicitly
+ * undocumented/subject-to-change per Tailscale's own CLI help text, and
+ * this is still not the same as observing real output from a real
+ * `tailscaled` — that end-to-end confirmation still needs Phase 7's real
+ * infra — but the specific "does this field/shape exist at all" risk
+ * flagged by earlier sessions is now resolved with high confidence via
+ * direct source inspection, not guessed past.
  */
 public final class CliTailscaleClient implements TailscaleClient {
 

@@ -82,19 +82,28 @@ public final class HealthServer {
      * connections immediately but gives in-flight requests up to
      * {@code drainTimeout} to finish before forcing a stop.
      *
-     * <p><b>Open question, flagged not guessed past</b> (same category as
-     * this class's other Grizzly-API assumption on the constructor's 5-arg
-     * {@code createHttpServer} overload): this calls
-     * {@code HttpServer#shutdown(long, TimeUnit)}, which per Grizzly's
-     * documented API returns a {@code GrizzlyFuture<HttpServer>} that
-     * completes once the grace period elapses or all in-flight requests
-     * finish, whichever is first. This session has no working compiler for
-     * this source (see PROGRESS.md) and could not verify the exact method
-     * signature/behaviour against a real build. If wrong, this is the one
-     * method designed to absorb that correction — falls back to the
-     * known-working {@link #stop()} forceful path on any failure so a bad
-     * assumption here degrades to "less graceful," not "shutdown hangs
-     * forever."
+     * <p><b>API-shape questions flagged by earlier sessions, now confirmed
+     * against upstream source</b> (2026-07-21, no compiler was available so
+     * this was verified by reading the actual dependency source rather than
+     * compiling against it — see PROGRESS.md for the session that did this):
+     * both this method's {@code HttpServer#shutdown(long, TimeUnit)} call
+     * and the constructor's 5-arg {@code GrizzlyHttpServerFactory
+     * .createHttpServer(uri, resourceConfig, secure, sslEngineConfigurator,
+     * start)} overload were checked directly against
+     * {@code eclipse-ee4j/glassfish-grizzly}'s {@code HttpServer.java}
+     * (method signature: {@code public synchronized GrizzlyFuture<HttpServer>
+     * shutdown(final long gracePeriod, final TimeUnit timeUnit)}, and
+     * {@code GrizzlyFuture<V>} extends {@code java.util.concurrent.Future<V>},
+     * so the {@code .get(timeout, unit)} call below is valid) and against
+     * Jersey's published {@code GrizzlyHttpServerFactory} javadoc for the
+     * 5-arg overload used in the constructor. Both match this class's usage
+     * exactly. This resolves the "does this API shape even exist" risk;
+     * runtime behaviour (does the drain actually happen cleanly against a
+     * real container) is still unverified and needs a real Docker run
+     * (`LifecycleIT`/Phase 7), same as before. Falls back to the
+     * known-working {@link #stop()} forceful path on any failure regardless,
+     * so a wrong assumption here would still degrade to "less graceful," not
+     * "shutdown hangs forever."
      */
     public void stopGracefully(Duration drainTimeout) {
         if (!server.isStarted()) {
