@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,6 +44,31 @@ import static org.assertj.core.api.Assertions.assertThat;
  * stands up a second FakeAgh as a backup backend and asserts BackendProbe
  * failures never drive a withdraw (PHASES.md Phase 2 acceptance: "BackendProbe
  * does not drive FSM").
+ *
+ * <p><b>Real bug found and fixed (2026-07-21, via static reading of the
+ * Testcontainers API, not a live run — still no Docker in that sandbox):</b>
+ * every test method used to call {@code agent.waitingFor(Wait.forLogMessage
+ * (...))} AFTER {@code agent = startAgent()} had already returned an
+ * already-started container. Per Testcontainers' own contract, a wait
+ * strategy set via {@code waitingFor(...)} is only consulted during that
+ * container's own {@code start()} call — setting it afterwards is a no-op
+ * that does not retroactively block anything. So every one of these five
+ * tests was racing the agent's probe/advertise cycle instead of actually
+ * waiting for it: {@code buildAndStartAgentContainer}'s own wait strategy
+ * (blocks for {@code dns_ha_agent_started}, logged at process boot, before
+ * the first probe cycle even runs) was the only real synchronization point,
+ * and every assertion after it depended on undefined extra delay to
+ * coincidentally happen to land after the real advertise/HEALTHY line
+ * appeared. {@code PartitionIT} (written after this class) already
+ * independently discovered the same Testcontainers behaviour and used a
+ * polling {@code waitForLogContains} helper instead — this class now uses
+ * the equivalent ({@link #waitForLogMatches}, regex-based to preserve the
+ * original two-field-on-one-line match) at every one of those five call
+ * sites. This was a real correctness bug in the test suite itself (not
+ * production code), silently relying on timing luck rather than an actual
+ * synchronization guarantee — worth being aware of if any related IT test
+ * ever flaked before this fix; it wasn't the config/threshold values being
+ * wrong, it was never actually waiting.
  */
 @Testcontainers
 class EndToEndIT {
@@ -50,6 +77,8 @@ class EndToEndIT {
     private static final String FAKE_AGH_ALIAS = "fake-agh";
     private static final String FAKE_AGH_BACKUP_ALIAS = "fake-agh-backup";
     private static final int HEALTH_PORT = 8091;
+    private static final Pattern ADVERTISE_SUCCESS_PATTERN =
+        Pattern.compile("\"action\":\"advertise\".*\"result\":\"success\"");
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
 
@@ -78,12 +107,11 @@ class EndToEndIT {
     }
 
     @Test
-    void healthyProbeAdvertises() {
+    void healthyProbeAdvertises() throws InterruptedException {
         agent = startAgent();
 
         // Phase 1 AC: transitions STARTING -> HEALTHY and calls advertise within 10s.
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         String logs = agent.getLogs();
         assertThat(logs).contains("\"action\":\"advertise\"");
@@ -98,8 +126,7 @@ class EndToEndIT {
         // healthyProbeAdvertises, before breaking the filter — otherwise
         // there is nothing to withdraw (STARTING's desired route set is
         // already "nothing advertised").
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         fakeAgh.setFilterBypassed(true);
 
@@ -125,8 +152,7 @@ class EndToEndIT {
     @Test
     void healthEndpointMatchesSchema() throws Exception {
         agent = startAgent();
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         JsonNode json = jsonMapper.readTree(curlInContainer(agent, "/health"));
 
@@ -151,8 +177,7 @@ class EndToEndIT {
     @Test
     void metricsEndpointExposesPrometheusFormat() throws Exception {
         agent = startAgent();
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         String body = curlInContainer(agent, "/metrics");
 
@@ -177,8 +202,7 @@ class EndToEndIT {
         fakeAghBackup.start();
 
         agent = startAgentWithBackupBackend();
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         fakeAghBackup.setFilterBypassed(true); // ONLY the backup backend's filter breaks
 
@@ -201,6 +225,30 @@ class EndToEndIT {
             }
         }
         assertThat(backupFlaggedBroken).isTrue();
+    }
+
+    /**
+     * Polls {@link GenericContainer#getLogs()} until a line matching
+     * {@code pattern} appears or {@code timeout} elapses. Unlike calling
+     * {@code container.waitingFor(...)} on an already-started container
+     * (which is a documented no-op — Testcontainers wait strategies are
+     * only consulted during that container's own {@code start()} — see this
+     * class's javadoc for the real bug this replaced), this actually blocks
+     * the calling thread. Same technique {@code PartitionIT} independently
+     * arrived at for the same reason.
+     */
+    private static void waitForLogMatches(GenericContainer<?> container, Pattern pattern, Duration timeout)
+            throws InterruptedException {
+        Instant deadline = Instant.now().plus(timeout);
+        while (Instant.now().isBefore(deadline)) {
+            if (pattern.matcher(container.getLogs()).find()) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError(
+            "timed out after " + timeout + " waiting for log to match: " + pattern.pattern()
+                + "\nlogs so far:\n" + container.getLogs());
     }
 
     private String curlInContainer(GenericContainer<?> container, String path) throws Exception {

@@ -14,7 +14,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.function.UnaryOperator;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -46,12 +48,25 @@ import static org.assertj.core.api.Assertions.assertThat;
  * DNS responder, probes would fail forever and none of these scenarios
  * (which all depend on first reaching an advertised state) could exercise
  * anything beyond STARTING.
+ *
+ * <p><b>Real bug found and fixed (2026-07-21):</b> same issue as EndToEndIT
+ * (see its javadoc for the full explanation) — {@code agent.waitingFor(...)}
+ * called after {@code agent = startAgent(...)} had already started the
+ * container is a documented Testcontainers no-op, not a real wait. Both
+ * call sites here ({@code staleVipAdvertisementIsWithdrawnAtStartup} and
+ * {@code sigtermWithdrawsWithinFiveSecondsAndExitsZero}) now use the same
+ * polling {@link #waitForLogMatches} helper instead.
+ * {@code watchdogForceExitsOnHungProbeLoop} was never affected — it doesn't
+ * wait for the advertise line at all (the probe loop hangs before reaching
+ * it), it already polls container state directly in its own loop.
  */
 @Testcontainers
 class LifecycleIT {
 
     private static final String BLOCK_NAME = "dns-filter-sentinel.example.com";
     private static final String FAKE_AGH_ALIAS = "fake-agh";
+    private static final Pattern ADVERTISE_SUCCESS_PATTERN =
+        Pattern.compile("\"action\":\"advertise\".*\"result\":\"success\"");
 
     private Network network;
     private FakeAghContainer fakeAgh;
@@ -82,11 +97,10 @@ class LifecycleIT {
      * class javadoc) since this IT harness has no real Tailscale daemon.
      */
     @Test
-    void staleVipAdvertisementIsWithdrawnAtStartup() {
+    void staleVipAdvertisementIsWithdrawnAtStartup() throws InterruptedException {
         agent = startAgent(builder -> builder.withEnv("DNS_HA_AGENT_NOOP_SEED_ADVERTISED", "10.253.53.53/32"));
 
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         String logs = agent.getLogs();
         assertThat(logs).contains("found stale VIP advertisement at startup");
@@ -141,8 +155,7 @@ class LifecycleIT {
     @Test
     void sigtermWithdrawsWithinFiveSecondsAndExitsZero() throws Exception {
         agent = startAgent(builder -> builder);
-        agent.waitingFor(Wait.forLogMessage(".*\"action\":\"advertise\".*\"result\":\"success\".*\\n", 1)
-            .withStartupTimeout(Duration.ofSeconds(10)));
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
 
         long sentAt = System.currentTimeMillis();
         agent.getDockerClient().killContainerCmd(agent.getContainerId()).withSignal("TERM").exec();
@@ -164,6 +177,26 @@ class LifecycleIT {
         assertThat(tookMs).isLessThan(Duration.ofSeconds(10).toMillis()); // 5s budget + container-teardown slack
         assertThat(agent.getLogs()).contains("sigterm_withdraw_confirmed");
         assertThat(agent.getLogs()).contains("sigterm_graceful_shutdown_complete_exiting");
+    }
+
+    /**
+     * Polls {@link GenericContainer#getLogs()} until a line matching
+     * {@code pattern} appears or {@code timeout} elapses — see class
+     * javadoc ("Real bug found and fixed") for why this is needed instead
+     * of {@code container.waitingFor(...)} on an already-started container.
+     */
+    private static void waitForLogMatches(GenericContainer<?> container, Pattern pattern, Duration timeout)
+            throws InterruptedException {
+        Instant deadline = Instant.now().plus(timeout);
+        while (Instant.now().isBefore(deadline)) {
+            if (pattern.matcher(container.getLogs()).find()) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError(
+            "timed out after " + timeout + " waiting for log to match: " + pattern.pattern()
+                + "\nlogs so far:\n" + container.getLogs());
     }
 
     private GenericContainer<?> startAgent(UnaryOperator<GenericContainer<?>> customize) {
