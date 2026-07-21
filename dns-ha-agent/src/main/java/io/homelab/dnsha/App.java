@@ -4,9 +4,11 @@ import io.homelab.dnsha.config.BackendConfig;
 import io.homelab.dnsha.config.Config;
 import io.homelab.dnsha.config.ConfigException;
 import io.homelab.dnsha.config.ConfigLoader;
+import io.homelab.dnsha.config.PeerConfig;
 import io.homelab.dnsha.decide.Decision;
 import io.homelab.dnsha.http.HealthServer;
 import io.homelab.dnsha.metrics.Metrics;
+import io.homelab.dnsha.peer.PeerMonitor;
 import io.homelab.dnsha.probe.BackendProbe;
 import io.homelab.dnsha.probe.BackendProbeLoop;
 import io.homelab.dnsha.probe.DnsProbe;
@@ -33,11 +35,14 @@ import java.util.concurrent.CountDownLatch;
  *
  * As of Phase 2: wires up HealthServer (/health, /metrics) and, when
  * backend_probe.enabled, one BackendProbeLoop virtual thread per configured
- * backend. Still no peer monitor (Phase 3), no WatchdogThread / hardened
- * startup reconciliation / graceful SIGTERM handling (Phase 4 — this class
- * has a minimal best-effort shutdown hook only, noted below). The agent is
- * fully functional via logs + /health + /metrics per PHASES.md Phase 1/2
- * acceptance criteria.
+ * backend. As of Phase 3: wires up one PeerMonitor virtual thread per
+ * configured peer (config.peers() empty -> no threads started at all,
+ * "single-node region" per BLUEPRINT.md §4 note 1 / PHASES.md Phase 3
+ * "empty peer list disables peer monitoring entirely"). Still no
+ * WatchdogThread / hardened startup reconciliation / graceful SIGTERM
+ * handling (Phase 4 — this class has a minimal best-effort shutdown hook
+ * only, noted below). The agent is fully functional via logs + /health +
+ * /metrics per PHASES.md Phase 1/2/3 acceptance criteria.
  */
 public final class App {
 
@@ -75,6 +80,7 @@ public final class App {
         ProbeLoop probeLoop = new ProbeLoop(probe, healthState, config, reconciler, metrics);
 
         List<BackendProbeLoop> backendProbeLoops = startBackendProbeLoops(config, healthState, metrics);
+        List<PeerMonitor> peerMonitors = startPeerMonitors(config, healthState, metrics);
 
         Instant startedAt = Instant.now();
         HealthServer healthServer = new HealthServer(config, healthState, reconciler, metrics, startedAt);
@@ -93,6 +99,7 @@ public final class App {
             log.info("shutdown_hook_running", kv("node", config.node().name()));
             probeLoop.stop();
             backendProbeLoops.forEach(BackendProbeLoop::stop);
+            peerMonitors.forEach(PeerMonitor::stop);
             try {
                 healthServer.stop();
             } catch (RuntimeException e) {
@@ -134,6 +141,29 @@ public final class App {
             loops.add(loop);
         }
         return loops;
+    }
+
+    /**
+     * One virtual thread per configured peer (PHASES.md Phase 3: "one
+     * virtual thread per peer"). Returns an empty list (no threads started
+     * at all) when config.peers() is empty — PARTITIONED is then
+     * structurally unreachable, matching BLUEPRINT.md §4 note 1
+     * "single-node region (zero peers configured): PARTITIONED state is
+     * unreachable" and the Phase 3 acceptance criterion "empty peer list
+     * disables peer monitoring entirely".
+     */
+    private static List<PeerMonitor> startPeerMonitors(Config config, HealthState healthState, Metrics metrics) {
+        List<PeerMonitor> monitors = new ArrayList<>();
+        if (config.peers() == null || config.peers().isEmpty()) {
+            log.info("peer_monitor_disabled_no_peers_configured", kv("node", config.node().name()));
+            return monitors;
+        }
+        for (PeerConfig peer : config.peers()) {
+            PeerMonitor monitor = new PeerMonitor(peer, config, healthState, metrics);
+            Thread.ofVirtual().name("peer-monitor-" + peer.name()).start(monitor);
+            monitors.add(monitor);
+        }
+        return monitors;
     }
 
     private static TailscaleClient createTailscaleClient(Config config, boolean allowNoopFlag)
