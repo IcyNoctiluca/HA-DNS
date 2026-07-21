@@ -1,0 +1,18 @@
+---
+# Deploys/updates dns-ha-agent on hosts in the dns-edge group.
+# Usage (BLUEPRINT.md §15):
+#   ansible-playbook -l <node> ansible/playbooks/dns-ha-agent.yml
+#   ansible-playbook --limit dns-iom-01 ansible/playbooks/dns-ha-agent.yml   # canary
+#
+# Requires: community.docker collection (see ../requirements.yml), and each
+# target host already has Docker + Compose plugin + tailscaled installed with
+# tag:dns-edge applied (BLUEPRINT.md §15 "First-time deployment to a new edge",
+# steps 1-2 — not automated by this role; those are one-time host bootstrap
+# steps, deliberately out of scope here since they touch Tailscale enrolment).
+
+- name: Deploy dns-ha-agent
+  hosts: dns-edge
+  become: true
+  gather_facts: true
+  roles:
+    - dns-ha-agent

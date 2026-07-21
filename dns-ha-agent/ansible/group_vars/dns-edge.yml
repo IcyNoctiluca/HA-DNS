@@ -1,0 +1,17 @@
+---
+# Group vars for the dns-edge group (all dns-ha-agent nodes). Per BLUEPRINT.md
+# §15 "Rolling out a new agent version": bump dns_ha_agent_image_digest here
+# after a successful main-branch CI build, commit, then canary-deploy with
+# `--limit <one-node>` before rolling out to the rest of the group.
+
+# MANDATORY — read from the latest CI build's image-digest artifact
+# (BLUEPRINT.md §12). Empty by default so the role's assert task fails closed
+# rather than deploying an unpinned :latest.
+dns_ha_agent_image_digest: ""
+
+# MANDATORY — must match the sentinel A record + AGH block rule configured
+# per ../../PHASES.md Phase 0. This is homelab-specific; there is no safe
+# default.
+dns_ha_agent_filter_sentinel: ""
+
+dns_ha_agent_preserved_routes: []
