@@ -68,7 +68,7 @@ final class DualCheckEngine {
             try {
                 Message response = query(name, queryType);
                 if (response.getRcode() == Rcode.NOERROR && !answersOf(response).isEmpty()) {
-                    return ResolveCheckResult.ok();
+                    return ResolveCheckResult.success();
                 }
                 failures.add(name + "=" + Rcode.string(response.getRcode()));
             } catch (IOException e) {
@@ -97,7 +97,7 @@ final class DualCheckEngine {
                     }
                 }
             }
-            return FilterCheckResult.ok();
+            return FilterCheckResult.success();
         } catch (IOException e) {
             return FilterCheckResult.fail("query error: " + e.getMessage());
         }
@@ -130,7 +130,13 @@ final class DualCheckEngine {
     }
 
     private record ResolveCheckResult(boolean ok, String reason) {
-        static ResolveCheckResult ok() {
+        // Named success()/fail(), not ok()/fail() — a static factory named
+        // ok() collides with the record's own auto-generated public instance
+        // accessor `boolean ok()` for the `ok` component (same name, same
+        // zero-arg signature, one static one not). javac rejects that as an
+        // invalid accessor override, not an overload. Discovered by the
+        // first real compile of this file (2026-07-21) — see PROGRESS.md.
+        static ResolveCheckResult success() {
             return new ResolveCheckResult(true, null);
         }
 
@@ -140,7 +146,8 @@ final class DualCheckEngine {
     }
 
     private record FilterCheckResult(boolean ok, String reason) {
-        static FilterCheckResult ok() {
+        // Same ok()-vs-accessor collision as ResolveCheckResult above.
+        static FilterCheckResult success() {
             return new FilterCheckResult(true, null);
         }
 
