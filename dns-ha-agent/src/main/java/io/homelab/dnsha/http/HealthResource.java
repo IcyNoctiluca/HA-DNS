@@ -33,8 +33,10 @@ import java.util.List;
  * states for /metrics ("never triggers probes on demand") — an HTTP GET
  * here must not itself shell out to `tailscale`.
  *
- * peers[] / unreachable_peers are always empty before Phase 3 (PeerMonitor
- * does not exist yet — see PeerView's javadoc).
+ * peers[] / unreachable_peers are populated from HealthState's
+ * peer-observation set, which PeerMonitor (Phase 3) keeps current via
+ * HealthState.recordPeerPollResult. Both are empty when config.peers() is
+ * empty (peer monitoring disabled entirely — PHASES.md Phase 3).
  */
 @Path("/health")
 public final class HealthResource {
@@ -98,7 +100,7 @@ public final class HealthResource {
         for (PeerObservation p : snapshot.peerObservations()) {
             views.add(new PeerView(
                 p.peerName(),
-                p.firstReportedUnreachableTs() == null ? null : p.firstReportedUnreachableTs().toString(),
+                p.lastSeenTs() == null ? null : p.lastSeenTs().toString(),
                 p.reachable(),
                 p.reportedState() == null ? null : p.reportedState().name(),
                 p.reportsMeUnreachable()));

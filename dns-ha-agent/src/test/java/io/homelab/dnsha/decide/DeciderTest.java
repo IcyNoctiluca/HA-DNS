@@ -91,7 +91,7 @@ class DeciderTest {
         // (shouldn't happen with an empty peers config, but exercises the
         // "empty config.peers() short-circuits" branch specifically).
         PeerObservation unreachable = new PeerObservation(
-            "dns-iom-01", true, FsmState.HEALTHY, true, Instant.now().minus(Duration.ofMinutes(5)));
+            "dns-iom-01", true, FsmState.HEALTHY, true, Instant.now().minus(Duration.ofMinutes(5)), Instant.now());
 
         Decision decision = Decider.decide(fakeState(FsmState.HEALTHY, Set.of(unreachable)), config, () -> false);
         assertThat(decision).isEqualTo(Decision.ADVERTISE);
@@ -107,8 +107,8 @@ class DeciderTest {
 
         Instant longAgo = Instant.now().minus(Duration.ofMinutes(5));
         Set<PeerObservation> peers = Set.of(
-            new PeerObservation("dns-iom-01", true, FsmState.HEALTHY, true, longAgo),
-            new PeerObservation("dns-tor-01", true, FsmState.HEALTHY, true, longAgo));
+            new PeerObservation("dns-iom-01", true, FsmState.HEALTHY, true, longAgo, Instant.now()),
+            new PeerObservation("dns-tor-01", true, FsmState.HEALTHY, true, longAgo, Instant.now()));
 
         Decision decision = Decider.decide(fakeState(FsmState.HEALTHY, peers), config, () -> false);
         assertThat(decision).isEqualTo(Decision.WITHDRAW);
@@ -124,7 +124,7 @@ class DeciderTest {
 
         Instant longAgo = Instant.now().minus(Duration.ofMinutes(5));
         Set<PeerObservation> peers = Set.of(
-            new PeerObservation("dns-iom-01", true, FsmState.HEALTHY, true, longAgo));
+            new PeerObservation("dns-iom-01", true, FsmState.HEALTHY, true, longAgo, Instant.now()));
 
         Decision decision = Decider.decide(fakeState(FsmState.HEALTHY, peers), config, () -> false);
         assertThat(decision).isEqualTo(Decision.ADVERTISE);

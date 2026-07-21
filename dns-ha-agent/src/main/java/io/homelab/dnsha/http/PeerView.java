@@ -4,11 +4,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * One entry of the `peers[]` array in the /health response (BLUEPRINT.md
- * §6). Always empty before Phase 3 — PeerMonitor does not exist yet, so
- * HealthState's peer-observation set is never populated in Phase 1/2 (see
- * Decider/FsmReducer javadocs for the fuller phase-boundary note). This
- * type is defined now so the /health schema is stable and Phase 3 only has
- * to populate it, not invent it.
+ * §6). Populated from HealthState's peer-observation set (PeerMonitor,
+ * Phase 3) — empty when no peers are configured. {@code lastSeenTs} is
+ * when THIS agent last successfully reached the peer, not to be confused
+ * with the peer-unreachable-threshold timestamp used internally by
+ * FsmReducer.isPartitionConditionMet (PeerObservation.
+ * firstReportedUnreachableTs, not exposed in this schema).
  */
 public record PeerView(
     @JsonProperty("name") String name,

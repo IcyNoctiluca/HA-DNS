@@ -1,31 +1,32 @@
 package io.homelab.dnsha.decide;
 
 import io.homelab.dnsha.config.Config;
-import io.homelab.dnsha.config.SplitBrainConfig;
+import io.homelab.dnsha.state.FsmReducer;
 import io.homelab.dnsha.state.FsmState;
 import io.homelab.dnsha.state.HealthSnapshot;
 import io.homelab.dnsha.state.HealthState;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.function.BooleanSupplier;
 
 /**
  * Pure decision function: FSM state + config -> ADVERTISE or WITHDRAW.
  * See BLUEPRINT.md §7.
  *
- * The partition branch below mirrors the blueprint's Decider pseudocode
- * exactly (peer-unreachable counting against config.split_brain). It is
- * unreachable in practice before Phase 3 lands PeerMonitor, because
- * config.peers() is empty and HealthState never receives peer
- * observations until then — see FsmReducer's javadoc for the fuller
- * phase-boundary note. Implementing it now (rather than leaving a TODO)
- * means the Phase 1 unit-test matrix can already exercise "every FSM
- * state -> correct decision" including PARTITIONED/SHUTTING_DOWN, per
- * PHASES.md Phase 1 acceptance criteria, using synthetic HealthState
- * fixtures (no PeerMonitor required to construct the test inputs).
+ * The partition branch below is a fast-path check only: as of Phase 3,
+ * FsmReducer itself transitions a node into PARTITIONED the moment the
+ * peer-unreachable condition holds (see FsmReducer.isPartitionConditionMet,
+ * called on every HealthState mutation), so by the time decide() runs,
+ * snapshot.fsmState() is normally already PARTITIONED and the {@code fsm ==
+ * PARTITIONED} check below catches it. isPartitionConditionMet(snapshot,
+ * config) is kept as a second, independent evaluation of the exact same
+ * predicate (delegating to FsmReducer's shared implementation, not a
+ * duplicate copy) as defence-in-depth: even if some future caller invoked
+ * decide() against a HealthState snapshot that had not yet run through
+ * FsmReducer for the latest peer observations, the WITHDRAW decision would
+ * still be correct. Decider itself remains pure — this method never
+ * mutates the FsmState stored in HealthState; only FsmReducer does that.
  */
 public final class Decider {
 
@@ -76,7 +77,7 @@ public final class Decider {
             return Decision.WITHDRAW;
         }
 
-        // HEALTHY: check partition condition (Phase 3; inert until PeerMonitor exists).
+        // HEALTHY: defence-in-depth re-check of the partition condition (see class javadoc).
         if (isPartitionConditionMet(snapshot, config)) {
             return Decision.WITHDRAW;
         }
@@ -85,16 +86,6 @@ public final class Decider {
     }
 
     private static boolean isPartitionConditionMet(HealthSnapshot snapshot, Config config) {
-        SplitBrainConfig splitBrain = config.splitBrain();
-        if (splitBrain == null || !splitBrain.enabled() || config.peers() == null || config.peers().isEmpty()) {
-            return false;
-        }
-        Instant now = Instant.now();
-        long unreachableCount = snapshot.peerObservations().stream()
-            .filter(p -> p.reportsMeUnreachable() && p.firstReportedUnreachableTs() != null)
-            .filter(p -> !Duration.between(p.firstReportedUnreachableTs(), now)
-                .minus(splitBrain.peerUnreachableThreshold()).isNegative())
-            .count();
-        return unreachableCount >= splitBrain.minPeerReportsToSelfWithdraw();
+        return FsmReducer.isPartitionConditionMet(snapshot.peerObservations(), config);
     }
 }

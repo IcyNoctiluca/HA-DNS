@@ -67,11 +67,17 @@ backend_probe:
   #   - name: agh-iom-01
   #     address: "100.64.x.y:5353"
 
-# Peer agents — for split-brain detection (Phase 3). Empty list disables
-# peer monitoring entirely.
+# Peer agents — for split-brain detection. Empty list disables peer
+# monitoring entirely (single-node region behaviour, e.g. SHZ-01).
+# Example (uncomment and adjust once real peer health_urls are known):
+# peers:
+#   - name: dns-iom-01
+#     health_url: "http://100.64.x.y:8091/health"
 peers: []
 
-# Split-brain (partition) detection (Phase 3).
+# Split-brain (partition) detection. See BLUEPRINT.md §4 "PARTITIONED" for
+# the asymmetric-inbound scope note — this is best-effort, not a full
+# quorum system.
 split_brain:
   enabled: false
   peer_poll_interval: 15s

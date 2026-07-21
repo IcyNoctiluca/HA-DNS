@@ -1,11 +1,14 @@
 package io.homelab.dnsha.state;
 
 import io.homelab.dnsha.config.Config;
+import io.homelab.dnsha.config.PeerConfig;
+import io.homelab.dnsha.config.SplitBrainConfig;
 import io.homelab.dnsha.testsupport.TestConfigs;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -18,6 +21,14 @@ class HealthStateTest {
     private static final Config CONFIG = TestConfigs.minimalBuilder()
         .failThreshold(2)
         .successThreshold(3)
+        .build();
+
+    /** Same thresholds as CONFIG, plus two peers + split_brain enabled with min_peer_reports_to_self_withdraw=1. */
+    private static final Config PARTITION_CONFIG = TestConfigs.minimalBuilder()
+        .failThreshold(2)
+        .successThreshold(3)
+        .splitBrain(new SplitBrainConfig(true, Duration.ofSeconds(15), Duration.ofSeconds(5), Duration.ofSeconds(60), 1))
+        .peers(List.of(new PeerConfig("dns-iom-01", "http://a/health")))
         .build();
 
     @Test
@@ -74,7 +85,7 @@ class HealthStateTest {
     @Test
     void peerObservationsAreTrackedByName() {
         HealthState state = new HealthState(CONFIG);
-        state.recordPeerObservation(new PeerObservation("dns-iom-01", true, FsmState.HEALTHY, false, null));
+        state.recordPeerObservation(new PeerObservation("dns-iom-01", true, FsmState.HEALTHY, false, null, null));
         assertThat(state.snapshot().peerObservations()).hasSize(1);
 
         state.recordPeerUnreachable("dns-iom-01");
@@ -94,6 +105,104 @@ class HealthStateTest {
         Instant second = state.snapshot().peerObservations().iterator().next().firstReportedUnreachableTs();
 
         assertThat(second).isEqualTo(first);
+    }
+
+    // --- Phase 3: recordPeerPollResult (PeerMonitor's entry point) ---
+
+    @Test
+    void recordPeerPollResultTracksReachability() {
+        HealthState state = new HealthState(PARTITION_CONFIG);
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, false);
+
+        PeerObservation obs = state.snapshot().peerObservations().iterator().next();
+        assertThat(obs.reachable()).isTrue();
+        assertThat(obs.reportedState()).isEqualTo(FsmState.HEALTHY);
+        assertThat(obs.reportsMeUnreachable()).isFalse();
+        assertThat(obs.lastSeenTs()).isNotNull();
+    }
+
+    @Test
+    void recordPeerPollResultPreservesLastKnownStateAcrossFailedPoll() {
+        HealthState state = new HealthState(PARTITION_CONFIG);
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, false);
+        Instant lastSeenBeforeFailure = state.snapshot().peerObservations().iterator().next().lastSeenTs();
+
+        // Simulate a failed poll: PeerMonitor passes reachable=false but
+        // carries forward the last-known reportedState/reportsMeUnreachable
+        // (see PeerMonitor's lastKnownReportedState/lastKnownReportsMeUnreachable).
+        state.recordPeerPollResult("dns-iom-01", false, FsmState.HEALTHY, false);
+
+        PeerObservation obs = state.snapshot().peerObservations().iterator().next();
+        assertThat(obs.reachable()).isFalse();
+        assertThat(obs.reportedState()).isEqualTo(FsmState.HEALTHY); // carried forward, not nulled out
+        assertThat(obs.lastSeenTs()).isEqualTo(lastSeenBeforeFailure); // not advanced on a failed poll
+    }
+
+    @Test
+    void recordPeerPollResultSetsFirstReportedUnreachableTimestampOnFalseToTrueTransition() {
+        HealthState state = new HealthState(PARTITION_CONFIG);
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, false);
+        assertThat(state.snapshot().peerObservations().iterator().next().firstReportedUnreachableTs()).isNull();
+
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, true);
+        Instant first = state.snapshot().peerObservations().iterator().next().firstReportedUnreachableTs();
+        assertThat(first).isNotNull();
+
+        // Repeated true->true calls must not move the timestamp forward.
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, true);
+        Instant second = state.snapshot().peerObservations().iterator().next().firstReportedUnreachableTs();
+        assertThat(second).isEqualTo(first);
+    }
+
+    @Test
+    void recordPeerPollResultClearsFirstReportedUnreachableTimestampOnTrueToFalseTransition() {
+        HealthState state = new HealthState(PARTITION_CONFIG);
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, true);
+        assertThat(state.snapshot().peerObservations().iterator().next().firstReportedUnreachableTs()).isNotNull();
+
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, false);
+        assertThat(state.snapshot().peerObservations().iterator().next().firstReportedUnreachableTs()).isNull();
+        assertThat(state.snapshot().peerObservations().iterator().next().reportsMeUnreachable()).isFalse();
+    }
+
+    @Test
+    void recordPeerPollResultCanDriveHealthyToPartitionedTransition() {
+        // peer_unreachable_threshold=0 so the partition condition trips
+        // immediately on the same call that sets reportsMeUnreachable=true,
+        // without needing to sleep in a unit test.
+        Config zeroThreshold = TestConfigs.minimalBuilder()
+            .failThreshold(2)
+            .successThreshold(3)
+            .splitBrain(new SplitBrainConfig(true, Duration.ofSeconds(15), Duration.ofSeconds(5), Duration.ZERO, 1))
+            .peers(List.of(new PeerConfig("dns-iom-01", "http://a/health")))
+            .build();
+        HealthState state = new HealthState(zeroThreshold);
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1)); // -> HEALTHY
+        assertThat(state.currentState()).isEqualTo(FsmState.HEALTHY);
+
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, true);
+        assertThat(state.currentState()).isEqualTo(FsmState.PARTITIONED);
+
+        // Peer stops reporting us unreachable -> back to HEALTHY (local probes still passing).
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, false);
+        assertThat(state.currentState()).isEqualTo(FsmState.HEALTHY);
+    }
+
+    @Test
+    void recordPeerPollResultWithEmptyConfiguredPeersNeverPartitions() {
+        // Defensive: even if something called recordPeerPollResult with
+        // config.peers() empty (shouldn't happen -- PeerMonitor only runs
+        // when peers are configured, see App.startPeerMonitors), the
+        // partition condition must still be structurally unreachable.
+        HealthState state = new HealthState(CONFIG); // CONFIG has no peers configured
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1));
+        state.recordProbeSuccess(Duration.ofMillis(1)); // -> HEALTHY
+
+        state.recordPeerPollResult("dns-iom-01", true, FsmState.HEALTHY, true);
+        assertThat(state.currentState()).isEqualTo(FsmState.HEALTHY);
     }
 
     @Test

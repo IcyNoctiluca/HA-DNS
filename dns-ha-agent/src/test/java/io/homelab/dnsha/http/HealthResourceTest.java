@@ -115,6 +115,32 @@ class HealthResourceTest {
     }
 
     @Test
+    void peerResultsAppearInPeersArrayWithLastSeenTsSortedByNameAndFeedUnreachablePeers() {
+        // Regression test: HealthResource.toPeerViews previously wired
+        // PeerObservation.firstReportedUnreachableTs() into the peers[]
+        // "last_seen_ts" JSON field by mistake. This asserts last_seen_ts
+        // reflects PeerObservation.lastSeenTs() specifically.
+        HealthState state = new HealthState(CONFIG);
+        state.recordPeerPollResult("dns-tor-01", true, io.homelab.dnsha.state.FsmState.HEALTHY, false);
+        state.recordPeerPollResult("dns-iom-01", false, null, false); // unreachable, no prior known state
+
+        Reconciler reconciler = new Reconciler(new FakeClient(), new Metrics(), CONFIG);
+        HealthResource resource = new HealthResource(state, CONFIG, reconciler, Instant.now());
+
+        var peers = resource.get().peers();
+        assertThat(peers).hasSize(2);
+        assertThat(peers.get(0).name()).isEqualTo("dns-iom-01");
+        assertThat(peers.get(0).reachable()).isFalse();
+        assertThat(peers.get(0).lastSeenTs()).isNull(); // never successfully reached
+        assertThat(peers.get(1).name()).isEqualTo("dns-tor-01");
+        assertThat(peers.get(1).reachable()).isTrue();
+        assertThat(peers.get(1).reportedState()).isEqualTo("HEALTHY");
+        assertThat(peers.get(1).lastSeenTs()).isNotNull();
+
+        assertThat(resource.get().unreachablePeers()).containsExactly("dns-iom-01");
+    }
+
+    @Test
     void backendResultsAppearInBackendsArraySortedByName() {
         HealthState state = new HealthState(CONFIG);
         state.recordBackendProbeResult("agh-iom-01", "100.64.1.2:5353", true, false);

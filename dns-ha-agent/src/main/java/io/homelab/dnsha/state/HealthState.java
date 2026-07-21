@@ -65,11 +65,13 @@ public final class HealthState {
     }
 
     /**
-     * Records a peer observation (Phase 3 — PeerMonitor is not implemented
-     * yet, so nothing calls this in Phase 1/2). Kept here now because
-     * HealthState's peer-observation set is what Decider's partition check
-     * reads, and defining the shape early avoids a Phase 3 HealthState
-     * rewrite.
+     * Records a raw peer observation, replacing whatever is currently held
+     * for {@code observation.peerName()} wholesale. Exposed for tests and
+     * for callers that have already computed a full PeerObservation
+     * themselves; PeerMonitor (Phase 3) uses the narrower
+     * {@link #recordPeerPollResult} instead, which handles the sticky
+     * first-reported-unreachable/last-seen bookkeeping so callers don't
+     * have to re-derive it on every poll.
      */
     public void recordPeerObservation(PeerObservation observation) {
         update(prev -> {
@@ -79,12 +81,64 @@ public final class HealthState {
         });
     }
 
+    /**
+     * Records the result of one PeerMonitor poll cycle for {@code peerName}
+     * (Phase 3 — see io.homelab.dnsha.peer.PeerMonitor).
+     *
+     * @param reachable whether THIS agent could reach the peer's /health
+     *     just now. Feeds this node's own {@code unreachable_peers} list
+     *     (HealthResource) and {@code lastSeenTs} (advanced only when true).
+     * @param reportedState the peer's own last-known FSM state. On a failed
+     *     poll, PeerMonitor passes the value it last learned rather than
+     *     null — see PeerObservation's javadoc on why a single missed poll
+     *     must not erase what was previously known.
+     * @param peerReportsMeUnreachable whether the peer's own
+     *     /health.unreachable_peers list contained this node's name as of
+     *     the last successful poll of that peer (also caller-preserved
+     *     across failed polls). Drives the sticky
+     *     firstReportedUnreachableTs timestamp: set on a false-&gt;true
+     *     transition, cleared to null on true-&gt;false, held steady while
+     *     staying true — this is the timestamp
+     *     FsmReducer.isPartitionConditionMet measures against
+     *     peer_unreachable_threshold.
+     *
+     * Every call re-runs FsmReducer with the updated peer-observation set
+     * (same as recordPeerObservation/recordPeerUnreachable), so a single
+     * peer poll result can itself drive a HEALTHY &lt;-&gt; PARTITIONED
+     * transition.
+     */
+    public void recordPeerPollResult(
+            String peerName, boolean reachable, FsmState reportedState, boolean peerReportsMeUnreachable) {
+        update(prev -> {
+            PeerObservation existing = findPeer(prev, peerName);
+            Instant firstUnreachable;
+            if (peerReportsMeUnreachable) {
+                firstUnreachable = (existing != null && existing.reportsMeUnreachable())
+                    ? existing.firstReportedUnreachableTs()
+                    : Instant.now();
+            } else {
+                firstUnreachable = null;
+            }
+            Instant lastSeen = reachable ? Instant.now() : (existing != null ? existing.lastSeenTs() : null);
+            PeerObservation updated = new PeerObservation(
+                peerName, reachable, reportedState, peerReportsMeUnreachable, firstUnreachable, lastSeen);
+            Set<PeerObservation> next = replacePeer(prev.peerObservations(), updated);
+            FsmState nextState = FsmReducer.reduce(prev.fsmState(), prev.lastProbeResult(), next, config);
+            return prev.withPeerObservations(next, nextState);
+        });
+    }
+
+    /**
+     * Marks {@code peerName} as reporting this node unreachable (i.e. this
+     * node's own name was found in that peer's /health.unreachable_peers
+     * list), without asserting anything about reachable/reportedState.
+     * Narrower convenience wrapper kept for the existing unit-test matrix
+     * and for callers that only have this one signal; PeerMonitor uses
+     * {@link #recordPeerPollResult} for the full poll result instead.
+     */
     public void recordPeerUnreachable(String peerName) {
         update(prev -> {
-            PeerObservation existing = prev.peerObservations().stream()
-                .filter(p -> p.peerName().equals(peerName))
-                .findFirst()
-                .orElse(null);
+            PeerObservation existing = findPeer(prev, peerName);
             Instant firstUnreachable = (existing != null && existing.reportsMeUnreachable())
                 ? existing.firstReportedUnreachableTs()
                 : Instant.now();
@@ -93,11 +147,19 @@ public final class HealthState {
                 existing != null && existing.reachable(),
                 existing != null ? existing.reportedState() : null,
                 true,
-                firstUnreachable);
+                firstUnreachable,
+                existing != null ? existing.lastSeenTs() : null);
             Set<PeerObservation> next = replacePeer(prev.peerObservations(), updated);
             FsmState nextState = FsmReducer.reduce(prev.fsmState(), prev.lastProbeResult(), next, config);
             return prev.withPeerObservations(next, nextState);
         });
+    }
+
+    private static PeerObservation findPeer(HealthSnapshot snapshot, String peerName) {
+        return snapshot.peerObservations().stream()
+            .filter(p -> p.peerName().equals(peerName))
+            .findFirst()
+            .orElse(null);
     }
 
     /**

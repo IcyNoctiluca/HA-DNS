@@ -142,7 +142,7 @@ class EndToEndIT {
         assertThat(json.get("local_probe").get("filter_check_ok").asBoolean()).isTrue();
         assertThat(json.get("backends").isArray()).isTrue();
         assertThat(json.get("peers").isArray()).isTrue();
-        assertThat(json.get("peers")).isEmpty(); // no PeerMonitor before Phase 3
+        assertThat(json.get("peers")).isEmpty(); // this IT's config has peers: [] -- see PartitionIT for peer-populated cases
         assertThat(json.get("unreachable_peers")).isEmpty();
         assertThat(json.get("uptime_seconds").asLong()).isGreaterThanOrEqualTo(0);
     }
