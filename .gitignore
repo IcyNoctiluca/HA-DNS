@@ -16,3 +16,4 @@ __pycache__/
 # they could not be removed.
 _probe_delete.txt
 dns-ha-agent/_probe_delete2.txt
+.git-credentials
