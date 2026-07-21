@@ -76,9 +76,25 @@ public final class CliTailscaleClient implements TailscaleClient {
     /**
      * Runs the command to completion, returning stdout. Throws
      * TailscaleException on a non-zero exit, I/O failure, or timeout.
-     * Reads stdout/stderr fully before waiting on exit — safe here because
-     * `tailscale set` / `tailscale debug prefs` output is small (well
-     * under any pipe-buffer deadlock threshold).
+     *
+     * Waits for exit (bounded by commandTimeout) BEFORE reading
+     * stdout/stderr. Originally this read the streams first via
+     * readAllBytes() and only called waitFor() afterwards — but
+     * readAllBytes() blocks until the stream hits EOF, which for a child
+     * process only happens on exit. That meant a hung/slow child was
+     * effectively waited on with no timeout at all: readAllBytes() would
+     * block for however long the process actually took, and by the time
+     * waitFor(commandTimeout) finally ran the process had already exited,
+     * so it always returned true — the timeout branch was unreachable in
+     * practice. Caught by the first real test run of this class
+     * (commandTimeoutThrowsTailscaleException, 2026-07-21 — see
+     * PROGRESS.md); in production this would have meant a hung `tailscale
+     * set`/`tailscale debug prefs` blocked this thread indefinitely
+     * instead of failing fast. Reading stdout/stderr only after the
+     * process has already exited (or been forcibly killed) is safe here
+     * because output is small (well under any pipe-buffer deadlock
+     * threshold) — same assumption as before, just applied in the
+     * correct order.
      */
     private String runCommand(List<String> command) throws TailscaleException {
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -89,15 +105,9 @@ public final class CliTailscaleClient implements TailscaleClient {
             throw new TailscaleException("failed to start process: " + command, e);
         }
 
-        String stdout;
-        String stderr;
         boolean finished;
         try {
-            stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
             finished = process.waitFor(commandTimeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (IOException e) {
-            throw new TailscaleException("I/O error running command: " + command, e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new TailscaleException("interrupted running command: " + command, e);
@@ -106,6 +116,15 @@ public final class CliTailscaleClient implements TailscaleClient {
         if (!finished) {
             process.destroyForcibly();
             throw new TailscaleException("command timed out after " + commandTimeout + ": " + command);
+        }
+
+        String stdout;
+        String stderr;
+        try {
+            stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new TailscaleException("I/O error reading command output: " + command, e);
         }
 
         int exitCode = process.exitValue();
