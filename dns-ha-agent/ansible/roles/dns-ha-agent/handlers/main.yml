@@ -1,5 +1,5 @@
 ---
-- name: restart dns-ha-agent
+- name: Restart dns-ha-agent
   community.docker.docker_compose_v2:
     project_src: "{{ dns_ha_agent_compose_dir }}"
     state: restarted
