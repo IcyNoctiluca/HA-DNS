@@ -2,8 +2,6 @@ package io.homelab.dnsha.it;
 
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.InternetProtocol;
-import com.github.dockerjava.api.model.PortBinding;
-import com.github.dockerjava.api.model.Ports;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -20,13 +18,42 @@ import java.time.Duration;
  * stdlib-only Python UDP DNS responder with an HTTP control API, per
  * BLUEPRINT.md §10 "FakeAghContainer".
  *
- * NOT VERIFIED IN THIS SANDBOX: there is no Docker daemon available in the
- * environment this class was written in, so none of the Testcontainers
- * wiring below — in particular the manual UDP ExposedPort/PortBinding
- * setup, since GenericContainer#addExposedPorts only handles TCP by
- * default — has been exercised against a real Docker daemon. Treat this
- * as a best-effort implementation written from Testcontainers/docker-java
- * API documentation, not as confirmed-working code. See PROGRESS.md.
+ * <p><b>Real bug found and fixed (2026-07-21, via static reading of the
+ * Testcontainers/docker-java APIs and this class's own call sites, not a
+ * live run — still no Docker in this sandbox):</b> this class used to
+ * publish {@code DNS_PORT} (53/udp) to a <em>fixed</em> host port (53) via
+ * a raw {@code withCreateContainerCmdModifier} + {@code PortBindings}
+ * hack, on the theory that {@code GenericContainer#addExposedPorts} only
+ * tracks TCP. That theory is correct (confirmed against the Testcontainers
+ * 1.21.0 javadoc: {@code addExposedPort(Integer)} has no protocol
+ * parameter; the only overload that accepts {@code InternetProtocol} is
+ * the {@code protected} {@code addFixedExposedPort}, whose own javadoc
+ * warns it is fixed-port and discouraged "as clashes or instability are
+ * more likely"), but fixing it with a fixed host-port bind was the wrong
+ * remedy for the actual problem. Grepping every {@code it/} test class
+ * confirms {@code DNS_PORT} is <b>never</b> reached via
+ * {@code getMappedPort()} — the agent under test always resolves against
+ * the network alias (e.g. {@code target: fake-agh}) over the shared
+ * Testcontainers {@link Network}, which is plain container-to-container
+ * Docker networking and does not require the port to be exposed/published
+ * to the host at all (that machinery — {@code EXPOSE}, {@code -p},
+ * {@code ExposedPort}/{@code PortBinding} — only governs host-to-container
+ * reachability; the fake-agh image's own {@code Dockerfile} already
+ * declares {@code EXPOSE 53/udp} for documentation purposes). Binding a
+ * *fixed* host port 53/udp was therefore both unnecessary and actively
+ * broken: {@code EndToEndIT.backendProbeFailureDoesNotAffectFsmOrRouteMutation}
+ * starts a second {@code FakeAghContainer} (aliased
+ * {@code fake-agh-backup}) while the primary {@code fakeAgh} from
+ * {@code @BeforeEach} is still running — both old instances would have
+ * tried to bind the same fixed host port 53/udp, which Docker refuses
+ * ("port is already allocated"), so that test would have failed to even
+ * start its second container on the first real Docker run, unrelated to
+ * anything the test is actually trying to exercise. Fixed by dropping the
+ * fixed host-port publish entirely; {@code CONTROL_PORT} keeps using the
+ * ordinary (non-fixed, auto-assigned) {@code addExposedPort} +
+ * {@code getMappedPort()} pattern, which is host-reachable and collision-free
+ * by construction since Testcontainers picks a free ephemeral host port per
+ * container.
  */
 public final class FakeAghContainer extends GenericContainer<FakeAghContainer> {
 
@@ -42,17 +69,21 @@ public final class FakeAghContainer extends GenericContainer<FakeAghContainer> {
         withEnv("RESOLVE_IP", "93.184.216.34");
         withEnv("BYPASS_IP", "203.0.113.99");
 
-        // addExposedPorts() only tracks TCP; UDP needs the raw docker-java
-        // create-container command modified directly.
+        // CONTROL_PORT is reached from the test JVM (the host) via
+        // getMappedPort(), so it needs a real (auto-assigned) host
+        // port mapping.
         addExposedPort(CONTROL_PORT);
+        // DNS_PORT (53/udp) is reached only by other containers (the
+        // agent under test) over the shared Testcontainers Network via
+        // networkAlias — plain Docker container-to-container networking,
+        // which needs no host port exposure/publishing at all. We still
+        // register it as an exposed *container* port (no host binding)
+        // purely so `docker inspect`/`getExposedPorts()` accurately
+        // reflects what the container listens on; this is metadata only
+        // and never claims a host port, so multiple instances (see
+        // EndToEndIT's primary + backup FakeAgh) never collide.
         withCreateContainerCmdModifier(cmd -> {
             ExposedPort udpPort = new ExposedPort(DNS_PORT, InternetProtocol.UDP);
-            Ports portBindings = cmd.getHostConfig().getPortBindings();
-            if (portBindings == null) {
-                portBindings = new Ports();
-            }
-            portBindings.bind(udpPort, PortBinding.parse(":" + DNS_PORT).getBinding());
-            cmd.getHostConfig().withPortBindings(portBindings);
             cmd.withExposedPorts(concat(cmd.getExposedPorts(), udpPort));
         });
 
