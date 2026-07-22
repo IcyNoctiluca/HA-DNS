@@ -141,4 +141,67 @@ class CliTailscaleClientTest {
         assertThatThrownBy(() -> client.advertiseRoutes(Set.of("10.253.53.53/32")))
             .isInstanceOf(TailscaleException.class);
     }
+
+    /**
+     * Real bug fix (2026-07-22, see CliTailscaleClient/TailscaleConfig
+     * javadoc): a non-default tailscaled.sock location had no way to reach
+     * the CLI at all before this. `--socket` is a root-level flag so it must
+     * precede the subcommand (`set`/`debug`), not follow it.
+     */
+    @Test
+    void advertiseRoutesPrependsSocketFlagBeforeSubcommandWhenConfigured() throws Exception {
+        Path argsCapture = tempDir.resolve("captured-args.txt");
+        Path cli = writeFakeCli("""
+            #!/bin/sh
+            echo "$@" > "%s"
+            exit 0
+            """.formatted(argsCapture));
+
+        CliTailscaleClient client = new CliTailscaleClient(
+            cli.toString(), "/custom/path/tailscaled.sock", Duration.ofSeconds(5));
+        client.advertiseRoutes(Set.of("10.253.53.53/32"));
+
+        String captured = Files.readString(argsCapture).trim();
+        assertThat(captured).isEqualTo("--socket=/custom/path/tailscaled.sock set --advertise-routes=10.253.53.53/32");
+    }
+
+    @Test
+    void currentlyAdvertisedPrependsSocketFlagWhenConfigured() throws Exception {
+        Path argsCapture = tempDir.resolve("captured-args.txt");
+        Path cli = writeFakeCli("""
+            #!/bin/sh
+            echo "$@" > "%s"
+            echo '{"AdvertiseRoutes":null}'
+            exit 0
+            """.formatted(argsCapture));
+
+        CliTailscaleClient client = new CliTailscaleClient(
+            cli.toString(), "/custom/path/tailscaled.sock", Duration.ofSeconds(5));
+        client.currentlyAdvertised();
+
+        String captured = Files.readString(argsCapture).trim();
+        assertThat(captured).isEqualTo("--socket=/custom/path/tailscaled.sock debug prefs");
+    }
+
+    @Test
+    void noSocketFlagWhenSocketPathIsNullBlankOrOmitted() throws Exception {
+        Path argsCapture = tempDir.resolve("captured-args.txt");
+        Path cli = writeFakeCli("""
+            #!/bin/sh
+            echo "$@" > "%s"
+            exit 0
+            """.formatted(argsCapture));
+
+        // Null socketPath via the 3-arg constructor behaves identically to
+        // the deprecated 2-arg constructor used by every other test above.
+        CliTailscaleClient client = new CliTailscaleClient(cli.toString(), null, Duration.ofSeconds(5));
+        client.advertiseRoutes(Set.of("10.253.53.53/32"));
+        assertThat(Files.readString(argsCapture).trim())
+            .isEqualTo("set --advertise-routes=10.253.53.53/32");
+
+        CliTailscaleClient blankClient = new CliTailscaleClient(cli.toString(), "   ", Duration.ofSeconds(5));
+        blankClient.advertiseRoutes(Set.of("10.253.53.53/32"));
+        assertThat(Files.readString(argsCapture).trim())
+            .isEqualTo("set --advertise-routes=10.253.53.53/32");
+    }
 }

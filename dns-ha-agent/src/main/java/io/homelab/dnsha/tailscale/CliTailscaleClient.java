@@ -47,31 +47,75 @@ import java.util.stream.Collectors;
  * infra — but the specific "does this field/shape exist at all" risk
  * flagged by earlier sessions is now resolved with high confidence via
  * direct source inspection, not guessed past.
+ *
+ * SOCKET PATH (fixed 2026-07-22): every invocation now optionally prepends
+ * `--socket=<path>` (see {@link #command(String...)}), sourced from
+ * TailscaleConfig.socketPath / ansible's dns_ha_agent_tailscale_socket. Prior
+ * to this, the class had no way to target a non-default socket path at all —
+ * it relied entirely on the `tailscale` CLI's own hardcoded default
+ * (`/var/run/tailscale/tailscaled.sock` on Linux) happening to match wherever
+ * the compose template's bind-mount put the socket. That happened to be true
+ * for every currently-committed example (defaults/main.yml and
+ * host_vars/dns-ams-01.yml both use the default path), so this was never
+ * exercised as a live bug, but the ansible role explicitly documents
+ * dns_ha_agent_tailscale_socket as a per-node override ("Must match the
+ * tailscaled install on the edge node") — a node with a non-standard install
+ * location would have had every `tailscale set`/`debug prefs` call fail with
+ * no config-level way to fix it. See TailscaleConfig's javadoc for the
+ * upstream-confirmed reason `TS_SOCKET` (the env var docker-compose.yml.j2
+ * also sets) doesn't help here either.
  */
 public final class CliTailscaleClient implements TailscaleClient {
 
     private static final Logger log = LoggerFactory.getLogger(CliTailscaleClient.class);
 
     private final String cliPath;
+    private final String socketPath;
     private final Duration commandTimeout;
     private final ObjectMapper jsonMapper = new ObjectMapper();
 
+    /**
+     * @deprecated in favour of {@link #CliTailscaleClient(String, String, Duration)}.
+     * Retained so existing call sites/tests that don't care about a
+     * non-default socket path don't need to change. Omitting socketPath
+     * means every invocation relies on the `tailscale` binary's own
+     * compiled-in default socket lookup — see TailscaleConfig's javadoc for
+     * why this is NOT the same as setting the container's TS_SOCKET env var.
+     */
+    @Deprecated
     public CliTailscaleClient(String cliPath, Duration commandTimeout) {
+        this(cliPath, null, commandTimeout);
+    }
+
+    public CliTailscaleClient(String cliPath, String socketPath, Duration commandTimeout) {
         this.cliPath = Objects.requireNonNull(cliPath, "cliPath");
+        this.socketPath = (socketPath == null || socketPath.isBlank()) ? null : socketPath;
         this.commandTimeout = Objects.requireNonNull(commandTimeout, "commandTimeout");
+    }
+
+    /** Builds `[cliPath, (--socket=path,) ...args]` — `--socket` is a root-level
+     * persistent flag in the tailscale CLI, so it must precede the subcommand. */
+    private List<String> command(String... args) {
+        List<String> command = new java.util.ArrayList<>();
+        command.add(cliPath);
+        if (socketPath != null) {
+            command.add("--socket=" + socketPath);
+        }
+        command.addAll(List.of(args));
+        return List.copyOf(command);
     }
 
     @Override
     public void advertiseRoutes(Set<String> routes) throws TailscaleException {
         String joined = routes.stream().sorted().collect(Collectors.joining(","));
-        List<String> command = List.of(cliPath, "set", "--advertise-routes=" + joined);
+        List<String> command = command("set", "--advertise-routes=" + joined);
         log.info("tailscale_cli_invoke", kv("command", command));
         runCommand(command);
     }
 
     @Override
     public Set<String> currentlyAdvertised() throws TailscaleException {
-        List<String> command = List.of(cliPath, "debug", "prefs");
+        List<String> command = command("debug", "prefs");
         String stdout = runCommand(command);
         try {
             JsonNode root = jsonMapper.readTree(stdout);

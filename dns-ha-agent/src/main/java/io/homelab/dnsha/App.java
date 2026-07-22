@@ -227,7 +227,8 @@ public final class App {
         }
 
         // mode == "cli" (ConfigLoader.validate already rejected anything else)
-        return new CliTailscaleClient(config.tailscale().cliPath(), config.tailscale().commandTimeout());
+        return new CliTailscaleClient(
+            config.tailscale().cliPath(), config.tailscale().socketPath(), config.tailscale().commandTimeout());
     }
 
     private static void awaitForever() {

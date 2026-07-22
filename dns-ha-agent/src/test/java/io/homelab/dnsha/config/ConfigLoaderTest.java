@@ -34,6 +34,7 @@ class ConfigLoaderTest {
         tailscale:
           mode: cli
           cli_path: /usr/bin/tailscale
+          socket_path: /var/run/tailscale/tailscaled.sock
           managed_routes: [10.253.53.53/32]
           preserved_routes: []
           command_timeout: 10s
@@ -60,7 +61,43 @@ class ConfigLoaderTest {
         assertThat(config.probe().successThreshold()).isEqualTo(3);
         assertThat(config.tailscale().managedRoutes()).containsExactly("10.253.53.53/32");
         assertThat(config.tailscale().commandTimeout()).isEqualTo(Duration.ofSeconds(10));
+        assertThat(config.tailscale().socketPath()).isEqualTo("/var/run/tailscale/tailscaled.sock");
         assertThat(config.http().bindAddress()).isEqualTo("127.0.0.1");
+    }
+
+    /**
+     * Real bug fix (2026-07-22): tailscale.socket_path is optional — omitting
+     * it must not fail config loading, and must leave
+     * TailscaleConfig.socketPath() null so CliTailscaleClient falls back to
+     * the CLI's own default socket lookup (see TailscaleConfig javadoc).
+     */
+    @Test
+    void socketPathIsOptionalAndDefaultsToNull() {
+        String yamlWithoutSocketPath = """
+            version: 1
+            node:
+              name: dns-ams-01
+              region: eu
+              vip: 10.253.53.53/32
+            probe:
+              target: 10.253.53.53
+              resolve_names: [cloudflare.com]
+              resolve_type: A
+              block_name: dns-filter-sentinel.example.com
+              block_expectation:
+                mode: must_not_return_real_ip
+                allowed_rcodes: [NXDOMAIN]
+                allowed_ips: ["0.0.0.0"]
+              interval: 2s
+              query_timeout: 2s
+              fail_threshold: 2
+              success_threshold: 3
+            tailscale:
+              managed_routes: [10.253.53.53/32]
+            """;
+
+        Config config = ConfigLoader.loadFromString(yamlWithoutSocketPath);
+        assertThat(config.tailscale().socketPath()).isNull();
     }
 
     @Test
