@@ -276,6 +276,17 @@ tailscale:
   # Path to tailscale CLI in the container (baked into image).
   cli_path: /usr/bin/tailscale
 
+  # Optional. Explicit path to the tailscaled LocalAPI unix socket, passed to
+  # every CLI invocation as `--socket=<path>`. Omit to rely on the `tailscale`
+  # binary's own compiled-in default (/var/run/tailscale/tailscaled.sock on
+  # Linux). Fixed 2026-07-22: the container's TS_SOCKET env var (§11) does
+  # NOT configure the CLI client itself — only `tailscaled`/containerboot
+  # read it (tailscale/tailscale upstream issue #14406, open as of this
+  # writing) — so this field is the only real way to point the CLI at a
+  # non-default socket path. Rendered from ansible's
+  # dns_ha_agent_tailscale_socket (§14).
+  socket_path: /var/run/tailscale/tailscaled.sock
+
   # Routes this agent is ALLOWED to manage (advertise when HEALTHY,
   # withdraw otherwise). In v1 this should normally contain exactly the
   # HA DNS VIP. The Reconciler treats this list as the source of truth
@@ -940,11 +951,16 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      # Make the LocalAPI socket path explicit. The `tailscale` CLI defaults to
-      # /var/run/tailscale/tailscaled.sock, but Tailscale's official Docker image
-      # exposes TS_SOCKET for this purpose and setting it documents intent —
-      # anyone reading the compose file can see at a glance that the in-container
-      # CLI is talking to the host's tailscaled via that socket.
+      # Documentation-only (fixed 2026-07-22): TS_SOCKET is read by
+      # `tailscaled`/the official image's `containerboot` entrypoint, NOT by
+      # the `tailscale` CLI client (tailscale/tailscale upstream issue
+      # #14406, open as of this writing). This container runs neither of
+      # those — it bind-mounts the host's already-running tailscaled.sock and
+      # subprocesses the CLI against it — so this env var has no functional
+      # effect on socket resolution either way. The line that actually makes
+      # a non-default socket path work is `tailscale.socket_path` in the
+      # rendered config.yaml (§5), passed to the CLI as `--socket=...` by
+      # CliTailscaleClient.
       TS_SOCKET: /var/run/tailscale/tailscaled.sock
     volumes:
       - /etc/dns-ha-agent/config.yaml:/etc/dns-ha-agent/config.yaml:ro
@@ -953,8 +969,9 @@ services:
       # via its LocalAPI Unix socket. `network_mode: host` does NOT expose the
       # host filesystem socket — without this explicit mount, every
       # `tailscale set --advertise-routes=...` invocation will fail and the
-      # agent will not be able to perform its core function. The TS_SOCKET env
-      # var above points the CLI at this exact path.
+      # agent will not be able to perform its core function. The CLI is told
+      # to look here via `tailscale.socket_path` in config.yaml (§5), not via
+      # the TS_SOCKET env var above (which this container's CLI ignores).
       - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
     deploy:
       resources:
@@ -981,7 +998,7 @@ services:
 Two things make this layout work:
 
 1. **`network_mode: host`** — so the agent's HTTP server binds on the node's Tailscale IP (peer-reachable) and the local DNS probe to `10.253.53.53` follows the host's loopback alias.
-2. **Bind-mounted `tailscaled.sock`** — the `tailscale` CLI is a thin client over the LocalAPI Unix socket on the host (`/var/run/tailscale/tailscaled.sock`). Host networking alone does NOT expose this file into the container; it must be mounted explicitly. Without it, route mutation fails immediately and the agent enters fail-open. (Tailscale's official Docker docs use `TS_SOCKET` for the same reason in their own image.)
+2. **Bind-mounted `tailscaled.sock`** — the `tailscale` CLI is a thin client over the LocalAPI Unix socket on the host (`/var/run/tailscale/tailscaled.sock`). Host networking alone does NOT expose this file into the container; it must be mounted explicitly. Without it, route mutation fails immediately and the agent enters fail-open. The CLI is pointed at the mounted path via `tailscale.socket_path` in config.yaml (§5) / `--socket=...` (fixed 2026-07-22) — NOT via the `TS_SOCKET` env var, which only the official Tailscale Docker image's own `containerboot` entrypoint reads, not the plain `tailscale` CLI client (tailscale/tailscale upstream issue #14406).
 
 Alternative: run the agent as a host systemd service rather than a container. Lower operational tax for socket access, but loses the digest-pinned, byte-identical-rollback story we get from Docker. v1 sticks with the container + socket mount; revisit if the socket mount turns out to be brittle in practice.
 
@@ -1300,6 +1317,10 @@ split_brain:
 tailscale:
   mode: cli
   cli_path: /usr/bin/tailscale
+  # socket_path fixed 2026-07-22 to actually make dns_ha_agent_tailscale_socket
+  # a real per-node override — see §5 and CliTailscaleClient javadoc for why
+  # the TS_SOCKET env var in docker-compose.yml.j2 doesn't do this on its own.
+  socket_path: {{ dns_ha_agent_tailscale_socket }}
   managed_routes:
     - {{ dns_ha_agent_vip }}
   preserved_routes: {{ dns_ha_agent_preserved_routes | default([]) | to_json }}

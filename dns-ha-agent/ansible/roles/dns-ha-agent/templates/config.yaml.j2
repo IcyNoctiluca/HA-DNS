@@ -42,6 +42,13 @@ split_brain:
 tailscale:
   mode: cli
   cli_path: /usr/bin/tailscale
+  # Explicit --socket flag for the CLI (fixed 2026-07-22). The container's
+  # TS_SOCKET env var (docker-compose.yml.j2) does NOT configure the
+  # `tailscale` CLI client itself — only `tailscaled`/containerboot read it
+  # (tailscale/tailscale upstream issue #14406, still open). This field is
+  # what actually lets dns_ha_agent_tailscale_socket be a real per-node
+  # override; see CliTailscaleClient/TailscaleConfig javadoc.
+  socket_path: {{ dns_ha_agent_tailscale_socket }}
   managed_routes:
     - {{ dns_ha_agent_vip }}
   preserved_routes: {{ dns_ha_agent_preserved_routes | default([]) | to_json }}

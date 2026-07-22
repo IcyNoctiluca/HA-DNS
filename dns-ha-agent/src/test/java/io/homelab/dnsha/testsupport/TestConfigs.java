@@ -76,7 +76,7 @@ public final class TestConfigs {
                 failThreshold,
                 successThreshold);
             TailscaleConfig tailscale = new TailscaleConfig(
-                "cli", "/usr/bin/tailscale", managedRoutes, preservedRoutes, Duration.ofSeconds(10));
+                "cli", "/usr/bin/tailscale", null, managedRoutes, preservedRoutes, Duration.ofSeconds(10));
 
             return new Config(1, node, probe, null, peers, splitBrain, tailscale, null, null, null);
         }

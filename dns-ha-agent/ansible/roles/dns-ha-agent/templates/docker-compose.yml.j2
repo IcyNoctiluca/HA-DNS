@@ -9,11 +9,19 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      # Make the LocalAPI socket path explicit. The `tailscale` CLI defaults to
-      # /var/run/tailscale/tailscaled.sock, but Tailscale's official Docker image
-      # exposes TS_SOCKET for this purpose and setting it documents intent —
-      # anyone reading the compose file can see at a glance that the in-container
-      # CLI is talking to the host's tailscaled via that socket.
+      # Documentation-only (fixed 2026-07-22 — this was previously believed,
+      # incorrectly, to configure the CLI's socket lookup): TS_SOCKET is read
+      # by `tailscaled`/the official image's `containerboot` entrypoint, NOT
+      # by the `tailscale` CLI client (tailscale/tailscale upstream issue
+      # #14406, "FR: Make TS_SOCKET work with the `tailscale` CLI", still open
+      # as of this writing). This container runs neither — it bind-mounts the
+      # HOST's already-running tailscaled.sock and subprocesses the CLI
+      # against it — so this env var has no functional effect here either
+      # way. Left set purely so `docker inspect`/`docker compose config`
+      # shows the intended socket path at a glance. The line that actually
+      # makes a non-default socket path work is `tailscale.socket_path` in
+      # config.yaml.j2, rendered from this same variable and passed to the
+      # CLI as `--socket=...` by CliTailscaleClient.
       TS_SOCKET: {{ dns_ha_agent_tailscale_socket }}
     volumes:
       - {{ dns_ha_agent_config_dir }}/config.yaml:/etc/dns-ha-agent/config.yaml:ro
