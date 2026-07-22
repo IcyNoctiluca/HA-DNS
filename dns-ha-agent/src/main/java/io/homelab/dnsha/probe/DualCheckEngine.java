@@ -28,6 +28,20 @@ import java.util.List;
  *
  * Package-private: DnsProbe and BackendProbe are the only public entry
  * points; this is an implementation detail of both.
+ *
+ * A-RECORD ONLY (found/fixed at the config layer 2026-07-22): {@link #answersOf}
+ * below only extracts {@code ARecord} instances from a response's ANSWER
+ * section. probe.resolve_type is accepted by DnsProbe/BackendProbe as any
+ * string dnsjava's {@code Type.value()} recognises, but this engine has never
+ * actually supported anything other than "A" -- a real AAAA/MX/TXT response
+ * would parse fine at the DNS level yet {@link #answersOf} would always
+ * return an empty list for it, making {@link #checkResolve()} report failure
+ * even on a fully successful query. ConfigLoader now rejects any
+ * probe.resolve_type other than "A" at config-load time specifically because
+ * of this gap (see its validate() method) -- if AAAA support is ever added,
+ * extend this method to also collect {@code AAAARecord} addresses (and
+ * update ConfigLoader's validation + BLUEPRINT.md §5 accordingly) rather than
+ * just relaxing the config-level check.
  */
 final class DualCheckEngine {
 

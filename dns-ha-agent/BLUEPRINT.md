@@ -181,6 +181,13 @@ probe:
   resolve_names:
     - cloudflare.com
     - example.com
+  # MUST be "A" (case-insensitive). Enforced by ConfigLoader.validate() as of
+  # 2026-07-22: DualCheckEngine.answersOf() only extracts ARecord answers, so
+  # any other type would silently and permanently fail the resolve/filter
+  # checks even though the underlying DNS query itself succeeds. There is no
+  # IPv6/AAAA support in this design (the whole stack -- VIP, Tailscale CGNAT
+  # range -- is IPv4-only); this field exists to name the query type
+  # explicitly rather than to make it genuinely pluggable.
   resolve_type: A
 
   # A name that MUST be blocked by AGH (filter check).

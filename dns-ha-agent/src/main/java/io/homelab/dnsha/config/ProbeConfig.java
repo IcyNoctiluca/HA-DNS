@@ -12,6 +12,13 @@ import java.util.List;
 public record ProbeConfig(
     String target,
     List<String> resolveNames,
+    /**
+     * Defaults to "A" (below). ConfigLoader.validate() rejects any other
+     * value: DualCheckEngine.answersOf() only extracts ARecord answers, so a
+     * non-"A" type would silently and permanently fail the resolve/filter
+     * checks even when the underlying DNS query succeeds. See
+     * DualCheckEngine's javadoc if AAAA/other type support is ever added.
+     */
     String resolveType,
     String blockName,
     BlockExpectation blockExpectation,

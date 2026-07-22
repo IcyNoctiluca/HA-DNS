@@ -99,6 +99,30 @@ public final class ConfigLoader {
         if (isBlank(config.probe().blockName())) {
             throw new ConfigException("probe.block_name is required");
         }
+        // Real bug found 2026-07-22: ProbeConfig.resolveType is a free-form
+        // string, and DnsProbe/BackendProbe both accept ANY value dnsjava's
+        // Type.value() recognises (A, AAAA, MX, TXT, ...) with no complaint
+        // at construction time. But DualCheckEngine.answersOf() is hardcoded
+        // to extract only `ARecord` instances from the response — for any
+        // other resolve_type, a query that succeeds at the DNS level (NOERROR
+        // + real answers) would still be treated as a resolve-check FAILURE
+        // forever, because the (correctly-typed, e.g. AAAARecord) answers
+        // never match the `instanceof ARecord` filter. Per the fail-closed
+        // design this fails safe (never advertises), but it's an extremely
+        // confusing landmine: the agent would sit in STARTING (never
+        // reaching HEALTHY) or flap to UNHEALTHY with no indication in any
+        // log line that the actual root cause is "resolve_type isn't A, and
+        // the code doesn't support anything else" rather than a real DNS/
+        // filtering outage. Reject it at config-load time instead, with a
+        // message that says exactly why. See DualCheckEngine's javadoc.
+        if (!"A".equalsIgnoreCase(config.probe().resolveType())) {
+            throw new ConfigException(
+                "probe.resolve_type must be 'A' (got: " + config.probe().resolveType()
+                    + "); DualCheckEngine only extracts A-record answers from DNS responses, so any "
+                    + "other resolve_type would cause the resolve/filter checks to silently and "
+                    + "permanently fail even when the underlying DNS query itself succeeds -- add "
+                    + "AAAA/other record-type support to DualCheckEngine.answersOf() before allowing this");
+        }
         if (config.tailscale().managedRoutes() == null || config.tailscale().managedRoutes().isEmpty()) {
             throw new ConfigException("tailscale.managed_routes must have at least one entry");
         }

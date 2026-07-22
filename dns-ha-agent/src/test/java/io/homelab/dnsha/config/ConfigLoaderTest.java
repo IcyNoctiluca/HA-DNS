@@ -235,6 +235,59 @@ class ConfigLoaderTest {
             .hasMessageContaining("tailscale.mode");
     }
 
+    /**
+     * Real bug fix (2026-07-22): probe.resolve_type accepted any value
+     * dnsjava's Type.value() recognises, but DualCheckEngine.answersOf()
+     * only ever extracted ARecord answers -- a non-"A" resolve_type would
+     * silently and permanently fail the resolve/filter checks even when the
+     * underlying DNS query itself succeeded (see ConfigLoader.validate() and
+     * DualCheckEngine's javadoc). Now rejected at config-load time instead.
+     */
+    @Test
+    void nonARecordResolveTypeRejected() {
+        String yaml = """
+            version: 1
+            node: { name: x, region: eu, vip: 10.253.53.53/32 }
+            probe:
+              target: 10.253.53.53
+              resolve_names: [cloudflare.com]
+              resolve_type: AAAA
+              block_name: sentinel.example.com
+              interval: 2s
+              query_timeout: 2s
+              fail_threshold: 2
+              success_threshold: 3
+            tailscale:
+              managed_routes: [10.253.53.53/32]
+            """;
+
+        assertThatThrownBy(() -> ConfigLoader.loadFromString(yaml))
+            .isInstanceOf(ConfigException.class)
+            .hasMessageContaining("probe.resolve_type");
+    }
+
+    @Test
+    void lowercaseAResolveTypeAccepted() {
+        String yaml = """
+            version: 1
+            node: { name: x, region: eu, vip: 10.253.53.53/32 }
+            probe:
+              target: 10.253.53.53
+              resolve_names: [cloudflare.com]
+              resolve_type: a
+              block_name: sentinel.example.com
+              interval: 2s
+              query_timeout: 2s
+              fail_threshold: 2
+              success_threshold: 3
+            tailscale:
+              managed_routes: [10.253.53.53/32]
+            """;
+
+        Config config = ConfigLoader.loadFromString(yaml);
+        assertThat(config.probe().resolveType()).isEqualTo("a");
+    }
+
     @Test
     void malformedDurationRejected() {
         String yaml = """
