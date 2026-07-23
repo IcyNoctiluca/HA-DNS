@@ -333,7 +333,14 @@ logging:
   level: INFO
 
 metrics:
+  # Set false to disable the /metrics endpoint entirely (fixed 2026-07-23 --
+  # HealthServer now actually consults this; previously it was read but
+  # never checked, so /metrics was always served regardless).
   enabled: true
+  # MUST be "/metrics" -- enforced by ConfigLoader.validate() as of 2026-07-23.
+  # MetricsResource's @Path("/metrics") is a compile-time JAX-RS annotation;
+  # no other value is currently honored. This field exists to name the path
+  # explicitly rather than to make it genuinely configurable.
   path: /metrics
 ```
 
@@ -1344,8 +1351,8 @@ logging:
   level: INFO
 
 metrics:
-  enabled: true
-  path: /metrics
+  enabled: true  # see §5 -- HealthServer now honors this (fixed 2026-07-23)
+  path: /metrics  # MUST stay "/metrics" -- see §5
 ```
 
 ### Per-node inventory (example `host_vars/dns-ams-01.yml`)

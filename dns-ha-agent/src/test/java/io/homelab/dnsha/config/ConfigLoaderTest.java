@@ -130,6 +130,7 @@ class ConfigLoaderTest {
         assertThat(config.http().port()).isEqualTo(8091);
         assertThat(config.logging().format()).isEqualTo("JSON");
         assertThat(config.metrics().path()).isEqualTo("/metrics");
+        assertThat(config.metrics().enabled()).isTrue();
     }
 
     @Test
@@ -286,6 +287,38 @@ class ConfigLoaderTest {
 
         Config config = ConfigLoader.loadFromString(yaml);
         assertThat(config.probe().resolveType()).isEqualTo("a");
+    }
+
+    /**
+     * Real bug fix (2026-07-23): metrics.path was accepted as any string but
+     * MetricsResource's @Path("/metrics") is a compile-time JAX-RS annotation
+     * -- no other value was ever actually honored by HealthServer. Now
+     * rejected at config-load time instead (see ConfigLoader.validate() and
+     * HealthServer.buildResourceConfig's javadoc).
+     */
+    @Test
+    void nonDefaultMetricsPathRejected() {
+        String yaml = """
+            version: 1
+            node: { name: x, region: eu, vip: 10.253.53.53/32 }
+            probe:
+              target: 10.253.53.53
+              resolve_names: [cloudflare.com]
+              block_name: sentinel.example.com
+              interval: 2s
+              query_timeout: 2s
+              fail_threshold: 2
+              success_threshold: 3
+            tailscale:
+              managed_routes: [10.253.53.53/32]
+            metrics:
+              enabled: true
+              path: /custom-metrics
+            """;
+
+        assertThatThrownBy(() -> ConfigLoader.loadFromString(yaml))
+            .isInstanceOf(ConfigException.class)
+            .hasMessageContaining("metrics.path");
     }
 
     @Test

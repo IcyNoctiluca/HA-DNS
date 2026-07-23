@@ -130,6 +130,26 @@ public final class ConfigLoader {
         if (!"cli".equals(mode) && !"noop".equals(mode)) {
             throw new ConfigException("tailscale.mode must be 'cli' or 'noop', got: " + mode);
         }
+        // Real bug found 2026-07-23: metrics.path is a documented, per-node
+        // YAML knob (BLUEPRINT.md §5) with no code path that reads it --
+        // MetricsResource's `@Path("/metrics")` is a compile-time-static JAX-RS
+        // annotation, so any other configured value was silently ignored; the
+        // endpoint is always served at the literal /metrics regardless of what
+        // this field says. Same shape as the resolve_type/socket_path findings
+        // above: a config field threaded through convincingly but never
+        // reaching the code that would need to honor it. Rather than leave
+        // this as a second silent no-op alongside the metrics.enabled fix in
+        // HealthServer.buildResourceConfig(), reject any other value here with
+        // a message that says exactly why. See HealthServer's javadoc if a
+        // configurable path is ever actually wanted (needs a dynamic
+        // resource-binding mechanism, not just wiring this field through).
+        if (!"/metrics".equals(config.metrics().path())) {
+            throw new ConfigException(
+                "metrics.path must be '/metrics' (got: " + config.metrics().path()
+                    + "); MetricsResource's @Path(\"/metrics\") is a compile-time JAX-RS annotation, so no "
+                    + "other value is currently honored -- add dynamic resource-binding support before "
+                    + "allowing this");
+        }
     }
 
     private static boolean isBlank(String s) {
