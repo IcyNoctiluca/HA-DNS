@@ -65,5 +65,5 @@ logging:
   level: INFO
 
 metrics:
-  enabled: true
-  path: /metrics
+  enabled: true  # see BLUEPRINT.md §5 -- HealthServer now honors this (fixed 2026-07-23)
+  path: /metrics  # MUST stay "/metrics" -- ConfigLoader.validate() rejects any other value

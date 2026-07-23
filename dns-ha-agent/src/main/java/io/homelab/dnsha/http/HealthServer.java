@@ -22,7 +22,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Jersey-over-Grizzly HTTP server exposing /health and /metrics
+ * Jersey-over-Grizzly HTTP server exposing /health and (unless
+ * {@code metrics.enabled: false}, see {@link #buildResourceConfig}) /metrics
  * (BLUEPRINT.md §6, §9). Binds to config.http().bind_address():port() —
  * IMPORTANT: in production this MUST be the node's Tailscale IP, never
  * 0.0.0.0 or 127.0.0.1 (top-level AGENTS.md invariant #8; HttpConfig's
@@ -44,10 +45,7 @@ public final class HealthServer {
         this.port = config.http().port();
 
         URI uri = URI.create("http://" + bindAddress + ":" + port + "/");
-        ResourceConfig resourceConfig = new ResourceConfig();
-        resourceConfig.register(new HealthResource(healthState, config, reconciler, startedAt));
-        resourceConfig.register(new MetricsResource(metrics.registry));
-        resourceConfig.register(JacksonFeature.class);
+        ResourceConfig resourceConfig = buildResourceConfig(config, healthState, reconciler, metrics, startedAt);
 
         // Explicit 5-arg overload with start=false: some GrizzlyHttpServerFactory
         // overloads auto-start the server as a side effect of creation (the
@@ -56,6 +54,52 @@ public final class HealthServer {
         // for the first time or double-starting it. Passing start=false here
         // guarantees start() below is the only place the server is started.
         this.server = GrizzlyHttpServerFactory.createHttpServer(uri, resourceConfig, false, null, false);
+    }
+
+    /**
+     * Builds the Jersey {@link ResourceConfig} for this server. Package-visible
+     * (rather than inlined in the constructor) specifically so a unit test can
+     * assert on which resources get registered without starting a real Grizzly
+     * server / binding a socket — see {@code HealthServerTest}.
+     *
+     * <p><b>Real bug fixed 2026-07-23</b>: {@code MetricsResource} was
+     * registered unconditionally here, so {@code config.metrics().enabled()}
+     * — a documented, per-node YAML knob (BLUEPRINT.md §5) — had no effect
+     * whatsoever: setting it to {@code false} (or omitting the key from an
+     * otherwise-present {@code metrics:} block, which Jackson defaults to the
+     * primitive {@code false} rather than the record's {@code true} default
+     * that only applies when the whole section is absent) still left
+     * {@code /metrics} fully served. Same "config field threaded through
+     * convincingly but silently doesn't reach the code that should honor it"
+     * shape as the {@code probe.resolve_type} and {@code tailscale.socket_path}
+     * findings earlier in PROGRESS.md. Fixed by actually consulting the flag
+     * here. Every currently-committed config (ansible template, CI YAML,
+     * BLUEPRINT.md example) sets {@code enabled: true} explicitly, so this
+     * was never live-broken for the one documented deployment target, but it
+     * silently defeated the one way an operator could ever ask for
+     * {@code /metrics} to not be exposed on a given node.
+     *
+     * <p>{@code config.metrics().path()} is NOT similarly wired: JAX-RS
+     * {@code @Path} on {@link MetricsResource} is a compile-time-static
+     * annotation, so honoring an arbitrary configured path would need a
+     * dynamic resource-binding mechanism (e.g. a hand-rolled
+     * {@code ResourceConfig} filter or a second endpoint class), which is out
+     * of scope for this fix. Rather than leave that as a second silent no-op,
+     * {@code ConfigLoader.validate()} now rejects any {@code metrics.path}
+     * other than the literal {@code /metrics} at config-load time — see its
+     * javadoc.
+     */
+    static ResourceConfig buildResourceConfig(Config config, HealthState healthState, Reconciler reconciler,
+                                               Metrics metrics, Instant startedAt) {
+        ResourceConfig resourceConfig = new ResourceConfig();
+        resourceConfig.register(new HealthResource(healthState, config, reconciler, startedAt));
+        if (config.metrics().enabled()) {
+            resourceConfig.register(new MetricsResource(metrics.registry));
+        } else {
+            log.info("metrics_endpoint_disabled", kv("node", config.node().name()));
+        }
+        resourceConfig.register(JacksonFeature.class);
+        return resourceConfig;
     }
 
     public void start() {
