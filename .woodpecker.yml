@@ -30,7 +30,7 @@ steps:
       - cd dns-ha-agent
       - ./gradlew --no-daemon check
     when:
-      - event: [push, pull_request]
+      - event: [push, pull_request, manual]
 
   # PR-only: proves the image still builds and boots without needing
   # registry write access. Superseded by build-and-push + smoke-test on
@@ -105,7 +105,7 @@ steps:
       - docker buildx imagetools inspect git.bnet.internal/liamp/dns-ha-agent:latest --format '{{json .Manifest}}' | jq -r '.digest' > digest.txt
       - 'echo "Built digest: $(cat digest.txt)"'
     when:
-      - event: push
+      - event: [push, manual]
         branch: main
 
   smoke-test:
@@ -168,5 +168,5 @@ steps:
       - grep -q '"version"' /tmp/health.json
       - docker stop smoke
     when:
-      - event: push
+      - event: [push, manual]
         branch: main
