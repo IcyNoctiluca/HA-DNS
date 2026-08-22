@@ -681,14 +681,13 @@ UTC timestamps with second precision. Higher-frequency events (per-probe in DEBU
 | Metrics | Prometheus simpleclient | 0.16.x |
 | Logging | SLF4J + Logback + logstash-logback-encoder (JSON) | logback 1.5.x |
 | Testing | JUnit 5, AssertJ, Mockito, Testcontainers | latest stable |
-| CI | Forgejo Actions | self-hosted runner |
+| CI | Woodpecker | self-hosted runner (H1) |
 | Container base | `eclipse-temurin:21-jre-jammy` | rolling |
 
 ### Project structure
 
 ```
 dns-ha-agent/
-├── .forgejo/workflows/build.yml
 ├── ansible/roles/dns-ha-agent/
 │   ├── defaults/main.yml
 │   ├── tasks/main.yml
@@ -960,7 +959,7 @@ services:
     # Digest is rendered into this file by the ansible role from
     # dns_ha_agent_image_digest, which is bumped on each intentional deploy.
     # Rollback = change the digest var back to a known-good value, redeploy.
-    image: forgejo.homelab.internal/homelab/dns-ha-agent@sha256:DIGEST_HERE
+    image: git.bnet.internal/liamp/dns-ha-agent@sha256:DIGEST_HERE
     container_name: dns-ha-agent
     restart: unless-stopped
     network_mode: host
@@ -1018,150 +1017,35 @@ Alternative: run the agent as a host systemd service rather than a container. Lo
 
 ---
 
-## 12. CI/CD (Forgejo Actions)
+## 12. CI/CD (Woodpecker)
 
-### `.forgejo/workflows/build.yml`
+**Engine**: [Woodpecker](../../docs/k3s/woodpecker.md) at `ci.bnet.internal`, OAuth-wired to Forgejo. **Not Forgejo Actions** — that's deliberately disabled on this Forgejo instance (`actions.ENABLED=false`, by name, so it can't quietly stand up a competing CI system; see the Battlenet infra repo's `docs/k3s/forgejo.md` §4). An earlier draft of this section assumed Forgejo Actions and used GitHub-Actions-shaped syntax (`uses:`, `runs-on`, job outputs); that was never runnable against the real instance and has been replaced below.
 
-```yaml
-name: build
+The actual pipeline lives at [`../.woodpecker.yml`](../.woodpecker.yml) (repo root, not `dns-ha-agent/`, since that's where Woodpecker looks by default). Read that file for the literal, current definition — this section is a summary, not a second copy, so the two can't drift.
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+**Shape**, same intent as the original design:
+- `test`: `./gradlew --no-daemon check` in `eclipse-temurin:21-jdk-jammy`. Runs on every push and PR.
+- `pr-smoke-test` (PRs only): local single-arch `docker build` + boot + `/health`/`/metrics` check, without needing registry write access.
+- `build-and-push` (`main` only): multi-arch (`linux/amd64`, `linux/arm64`) `docker buildx build --push` to the Forgejo registry, tagged `:latest`. The manifest digest is resolved with `docker buildx imagetools inspect` and written to `digest.txt` in the shared workspace — Woodpecker has no GitHub-Actions-style `needs.<job>.outputs.<x>` mechanism, so passing the digest to the next step is a plain file, not a job output.
+- `smoke-test` (`main` only): pulls the image **by digest** (from `digest.txt`), boots it, polls `/health` with retry, asserts `/metrics`.
 
-jobs:
-  test:
-    runs-on: docker
-    container:
-      image: eclipse-temurin:21-jdk-jammy
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run unit + integration tests
-        run: ./gradlew --no-daemon test
-      - name: Upload test reports
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: test-reports
-          path: build/reports/tests/
+Docker-in-Docker is required because Woodpecker step containers don't get host Docker access by default — a `services.docker` sidecar (`docker:24-dind`, `privileged: true`) provides one, reachable at `tcp://docker:2375`. This is why the repo must be marked **trusted** in Woodpecker's own repo settings (privileged containers are opt-in per repo). `linux/arm64` (Pi 5 edges) additionally needs QEMU registered on the runner via `tonistiigi/binfmt --install all`, since H1 (the only registered runner, per [`woodpecker.md`](../../docs/k3s/woodpecker.md) §3) is x86.
 
-  build-and-push:
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    runs-on: docker
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Log in to Forgejo registry
-        uses: docker/login-action@v3
-        with:
-          registry: forgejo.homelab.internal
-          username: ${{ secrets.FORGEJO_REGISTRY_USER }}
-          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
-      - name: Build and push multi-arch
-        id: push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          # :latest published as a convenience pointer ONLY.
-          # Ansible deploys pin by digest, not by :latest.
-          tags: |
-            forgejo.homelab.internal/homelab/dns-ha-agent:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Publish digest as build artifact
-        run: |
-          echo "Built digest: ${{ steps.push.outputs.digest }}"
-          echo "${{ steps.push.outputs.digest }}" > digest.txt
-      - name: Upload digest artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: image-digest
-          path: digest.txt
-
-  smoke-test:
-    needs: build-and-push
-    runs-on: docker
-    steps:
-      - uses: actions/checkout@v4
-      - name: Render smoke-test config
-        run: |
-          # CI has no Tailscale interface, so bind to 127.0.0.1 and use the
-          # test-only tailscale.mode=noop path (allowed because the
-          # DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE env var is set below).
-          cat > test-config.yaml <<'EOF'
-          version: 1
-          node: { name: smoke, region: ci, vip: 10.253.53.53/32 }
-          probe:
-            target: 10.253.53.53
-            resolve_names: [cloudflare.com]
-            resolve_type: A
-            block_name: dns-filter-sentinel.example
-            block_expectation:
-              mode: must_not_return_real_ip
-              allowed_rcodes: [NXDOMAIN, REFUSED, NOERROR]
-              allowed_ips: ["0.0.0.0"]
-            interval: 2s
-            query_timeout: 2s
-            fail_threshold: 2
-            success_threshold: 3
-          peers: []
-          split_brain: { enabled: false }
-          tailscale:
-            mode: noop
-            cli_path: /usr/bin/tailscale
-            managed_routes: [10.253.53.53/32]
-            preserved_routes: []
-            command_timeout: 10s
-          http: { bind_address: 127.0.0.1, port: 8091 }
-          logging: { format: JSON, level: INFO }
-          metrics: { enabled: true, path: /metrics }
-          EOF
-      - name: Pull and smoke-test (by digest)
-        run: |
-          DIGEST="${{ needs.build-and-push.outputs.digest }}"
-          IMAGE="forgejo.homelab.internal/homelab/dns-ha-agent@${DIGEST}"
-          docker pull "${IMAGE}"
-          docker run -d --name smoke --rm \
-            --network host \
-            -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true \
-            -v "${PWD}/test-config.yaml:/etc/dns-ha-agent/config.yaml" \
-            "${IMAGE}"
-          # Poll /health with retry rather than a flat sleep — the agent
-          # binds and starts the HTTP server in well under 5s, but startup
-          # variance can occasionally push past a fixed 30s sleep.
-          for i in $(seq 1 12); do
-            sleep 2
-            if wget -qO- http://127.0.0.1:8091/health > /tmp/health.json; then
-              break
-            fi
-          done
-          jq . /tmp/health.json
-          docker stop smoke
-```
-
-**Versioning**: every main-branch commit publishes a new image to the Forgejo registry. The `:latest` tag is published as a convenience pointer for humans browsing the registry, but **deployments pin by digest** (`sha256:...`) via the ansible variable `dns_ha_agent_image_digest`. CI exposes the digest as a job output and as a build artifact, so the new digest can be read from CI after a successful build.
+**Versioning**: every main-branch commit publishes a new image to the Forgejo registry. The `:latest` tag is published as a convenience pointer for humans browsing the registry, but **deployments pin by digest** (`sha256:...`) via the ansible variable `dns_ha_agent_image_digest`. CI exposes the digest as a workspace file (`digest.txt`) inside the same pipeline run; there is no cross-run artifact store to read it from later, so a human rolling forward reads it from the `build-and-push` step's own log line (`Built digest: ...`) or `docker buildx imagetools inspect` against `:latest` directly.
 
 **Rollback**: change `dns_ha_agent_image_digest` in ansible to a previous known-good digest, re-run the playbook. The previous artifact is still in the registry (Forgejo retention keeps the last 20 digests); rollback is byte-identical to the prior production state.
 
-**Secrets** (configured in Forgejo repo settings):
-- `FORGEJO_REGISTRY_USER`
-- `FORGEJO_REGISTRY_TOKEN`
+**Secrets** (configured in Woodpecker's per-repo secret store, not Forgejo — Woodpecker does not read Forgejo Actions secrets):
+- `forgejo_registry_user`
+- `forgejo_registry_token`
 
 ---
 
 ## 13. Hosting / Registry
 
-- **Registry**: Forgejo's built-in container registry at `forgejo.homelab.internal/homelab/dns-ha-agent`.
-- **Visibility**: private to the `homelab` org.
-- **Auth**: Forgejo personal access token with `write:packages` scope, stored as a CI secret. Ansible pulls with a read-only deploy token (separate token, `read:packages` scope only).
+- **Registry**: Forgejo's built-in container registry at `git.bnet.internal/liamp/dns-ha-agent`. (No `homelab` org exists on this Forgejo instance — repos and their packages live under the `liamp` user, per the pattern documented in `docs/k3s/forgejo.md` §3 of the Battlenet infra repo.)
+- **Visibility**: private, owned by `liamp`.
+- **Auth**: Forgejo personal access token with `write:package` scope, stored as a Woodpecker CI secret (`forgejo_registry_token`). Ansible pulls with a read-only deploy token (separate token, `read:package` scope only).
 - **Tags published**: `:latest` (rolling pointer for browse-only). Deployments pin by `@sha256:DIGEST`.
 - **Retention**: keep last 20 image digests (Forgejo retention policy). This is the rollback window — going further back than 20 deploys requires re-building from source. Adjust if your deploy cadence is high.
 
@@ -1185,7 +1069,7 @@ ansible/roles/dns-ha-agent/
 ### `defaults/main.yml`
 
 ```yaml
-dns_ha_agent_image_repo: forgejo.homelab.internal/homelab/dns-ha-agent
+dns_ha_agent_image_repo: git.bnet.internal/liamp/dns-ha-agent
 
 # MANDATORY: must be set in group_vars (or per-node host_vars).
 # This is the immutable artifact pin. Bump on intentional deploys; revert
@@ -1460,8 +1344,8 @@ For panic-mode rollback without going through ansible:
 
 ```bash
 # On affected node
-docker image ls forgejo.homelab.internal/homelab/dns-ha-agent --digests
-docker pull forgejo.homelab.internal/homelab/dns-ha-agent@sha256:<previous>
+docker image ls git.bnet.internal/liamp/dns-ha-agent --digests
+docker pull git.bnet.internal/liamp/dns-ha-agent@sha256:<previous>
 # Edit /etc/dns-ha-agent/docker-compose.yml to use the previous digest
 docker compose -f /etc/dns-ha-agent/docker-compose.yml up -d
 # Then fix the ansible vars to match, so the next playbook run doesn't undo it

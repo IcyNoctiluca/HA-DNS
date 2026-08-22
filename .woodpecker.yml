@@ -1,0 +1,183 @@
+# CI for dns-ha-agent, run by Woodpecker (ci.bnet.internal).
+#
+# Forgejo Actions is deliberately disabled on the Forgejo instance this repo
+# lives on (actions.ENABLED=false, by name — see the Battlenet infra repo's
+# docs/k3s/forgejo.md §4). Woodpecker is the declared CI system instead, so
+# this pipeline is Woodpecker-native syntax, not GitHub/Forgejo Actions —
+# there is no `uses:`, no `runs-on`, and no job-output passing between
+# steps. Shape (test -> PR smoke test / build+push+digest -> smoke test by
+# digest) mirrors dns-ha-agent/BLUEPRINT.md §12's original intent exactly;
+# only the execution engine changed.
+#
+# The Docker build/push steps need a real Docker daemon, which the agent's
+# own container does not provide — `services.docker` runs one as a
+# privileged sidecar (Woodpecker's standard DinD pattern), reachable at
+# tcp://docker:2375 from every step below. This repo must be marked
+# "trusted" (privileged containers allowed) in Woodpecker's repo settings
+# for the service to start.
+
+services:
+  docker:
+    image: docker:24-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+
+steps:
+  test:
+    image: eclipse-temurin:21-jdk-jammy
+    commands:
+      - cd dns-ha-agent
+      - ./gradlew --no-daemon check
+    when:
+      - event: [push, pull_request]
+
+  # PR-only: proves the image still builds and boots without needing
+  # registry write access. Superseded by build-and-push + smoke-test on
+  # main, which pull the real pushed image by digest instead of building
+  # locally a second time.
+  pr-smoke-test:
+    image: docker:24-cli
+    environment:
+      DOCKER_HOST: tcp://docker:2375
+    commands:
+      - apk add --no-cache wget
+      - cd dns-ha-agent
+      - docker build -t dns-ha-agent:ci .
+      - |
+        cat > /tmp/ci-config.yaml <<'CFG'
+        version: 1
+        node: { name: ci-smoke, region: ci, vip: 10.253.53.53/32 }
+        probe:
+          target: 10.253.53.53
+          resolve_names: [cloudflare.com]
+          resolve_type: A
+          block_name: dns-filter-sentinel.example
+          block_expectation:
+            mode: must_not_return_real_ip
+            allowed_rcodes: [NXDOMAIN, REFUSED, NOERROR]
+            allowed_ips: ["0.0.0.0"]
+          interval: 2s
+          query_timeout: 2s
+          fail_threshold: 2
+          success_threshold: 3
+        peers: []
+        split_brain: { enabled: false }
+        tailscale:
+          mode: noop
+          cli_path: /usr/bin/tailscale
+          managed_routes: [10.253.53.53/32]
+          preserved_routes: []
+          command_timeout: 10s
+        http: { bind_address: 127.0.0.1, port: 8091 }
+        logging: { format: JSON, level: INFO }
+        metrics: { enabled: true, path: /metrics }
+        CFG
+      - docker run -d --name ci-smoke --rm
+          -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true
+          -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml
+          dns-ha-agent:ci
+      - sleep 5
+      - docker logs ci-smoke
+      - docker exec ci-smoke wget -qO- http://127.0.0.1:8091/health | tee /tmp/ci-health.json
+      - grep -q '"version"' /tmp/ci-health.json
+      - docker exec ci-smoke wget -qO- http://127.0.0.1:8091/metrics | tee /tmp/ci-metrics.txt
+      - grep -q '^dns_ha_agent_probe_total' /tmp/ci-metrics.txt
+      - docker stop ci-smoke
+    when:
+      - event: pull_request
+
+  build-and-push:
+    image: docker:24-cli
+    environment:
+      DOCKER_HOST: tcp://docker:2375
+      REGISTRY_USER:
+        from_secret: forgejo_registry_user
+      REGISTRY_TOKEN:
+        from_secret: forgejo_registry_token
+    commands:
+      - apk add --no-cache jq
+      # linux/arm64 target (Pi 5 edges) needs QEMU emulation when building
+      # on an x86 runner (H1).
+      - docker run --rm --privileged tonistiigi/binfmt --install all
+      - docker buildx create --use
+      - echo "$REGISTRY_TOKEN" | docker login git.bnet.internal -u "$REGISTRY_USER" --password-stdin
+      # :latest published as a convenience pointer ONLY.
+      # Ansible deploys pin by digest, not by :latest.
+      - docker buildx build
+          --platform linux/amd64,linux/arm64
+          -f dns-ha-agent/Dockerfile
+          -t git.bnet.internal/liamp/dns-ha-agent:latest
+          --push
+          dns-ha-agent
+      - docker buildx imagetools inspect git.bnet.internal/liamp/dns-ha-agent:latest --format '{{json .Manifest}}' | jq -r '.digest' > digest.txt
+      - echo "Built digest: $(cat digest.txt)"
+    when:
+      - event: push
+        branch: main
+
+  smoke-test:
+    image: docker:24-cli
+    environment:
+      DOCKER_HOST: tcp://docker:2375
+    commands:
+      - apk add --no-cache wget jq
+      - |
+        cat > test-config.yaml <<'EOF'
+        version: 1
+        node: { name: smoke, region: ci, vip: 10.253.53.53/32 }
+        probe:
+          target: 10.253.53.53
+          resolve_names: [cloudflare.com]
+          resolve_type: A
+          block_name: dns-filter-sentinel.example
+          block_expectation:
+            mode: must_not_return_real_ip
+            allowed_rcodes: [NXDOMAIN, REFUSED, NOERROR]
+            allowed_ips: ["0.0.0.0"]
+          interval: 2s
+          query_timeout: 2s
+          fail_threshold: 2
+          success_threshold: 3
+        peers: []
+        split_brain: { enabled: false }
+        tailscale:
+          mode: noop
+          cli_path: /usr/bin/tailscale
+          managed_routes: [10.253.53.53/32]
+          preserved_routes: []
+          command_timeout: 10s
+        http: { bind_address: 127.0.0.1, port: 8091 }
+        logging: { format: JSON, level: INFO }
+        metrics: { enabled: true, path: /metrics }
+        EOF
+      # Pull and smoke-test BY DIGEST, not :latest — proves the exact
+      # artifact Ansible would pin to actually boots.
+      - DIGEST=$(cat digest.txt)
+      - IMAGE="git.bnet.internal/liamp/dns-ha-agent@${DIGEST}"
+      - docker pull "$IMAGE"
+      - docker run -d --name smoke --rm
+          -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true
+          -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml"
+          "$IMAGE"
+      - |
+        status=1
+        for i in $(seq 1 12); do
+          sleep 2
+          if docker exec smoke wget -qO- http://127.0.0.1:8091/health > /tmp/health.json; then
+            status=0
+            break
+          fi
+        done
+        if [ "$status" -ne 0 ]; then
+          echo "agent never became reachable on /health" >&2
+          docker logs smoke || true
+          docker stop smoke || true
+          exit 1
+        fi
+      - jq . /tmp/health.json
+      - grep -q '"version"' /tmp/health.json
+      - docker stop smoke
+    when:
+      - event: push
+        branch: main

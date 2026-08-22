@@ -5,7 +5,7 @@
 # deploy; the role's own assert tasks (tasks/main.yml) refuse to run without
 # the two safety-critical ones (image digest, filter sentinel).
 
-dns_ha_agent_image_repo: forgejo.homelab.internal/homelab/dns-ha-agent
+dns_ha_agent_image_repo: git.bnet.internal/liamp/dns-ha-agent
 
 # MANDATORY: must be set in group_vars (or per-node host_vars).
 # This is the immutable artifact pin. Bump on intentional deploys; revert
