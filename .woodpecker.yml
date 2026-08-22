@@ -162,6 +162,7 @@ steps:
         EOF
       # Pull and smoke-test BY DIGEST, not :latest — proves the exact
       # artifact Ansible would pin to actually boots.
+      - pwd && ls -la
       - DIGEST=$(cat digest.txt)
       - IMAGE="git.bnet.internal/liamp/dns-ha-agent@${DIGEST}"
       - docker pull "$IMAGE"
