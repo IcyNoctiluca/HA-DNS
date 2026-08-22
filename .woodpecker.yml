@@ -97,7 +97,12 @@ steps:
       # linux/arm64 target (Pi 5 edges) needs QEMU emulation when building
       # on an x86 runner (H1).
       - docker run --rm --privileged tonistiigi/binfmt --install all
-      - docker buildx create --use
+      # network=host: the buildx builder container otherwise gets its own
+      # network namespace with public DNS (8.8.8.8), which can't resolve
+      # git.bnet.internal -- found live when the multi-arch build succeeded
+      # but the push failed on DNS lookup. Sharing the dind service's own
+      # netns (which has the cluster's internal DNS) fixes it.
+      - docker buildx create --use --driver-opt network=host
       - echo "$REGISTRY_TOKEN" | docker login git.bnet.internal -u "$REGISTRY_USER" --password-stdin
       # :latest published as a convenience pointer ONLY.
       # Ansible deploys pin by digest, not by :latest.
