@@ -604,7 +604,7 @@ Health-driven route mutation is handled by `dns-ha-agent`, a containerised Java 
 
 **Deployment summary** (the operational hook for this document):
 
-1. The agent is built by Forgejo Actions and published to the Forgejo container registry at `forgejo.homelab.internal/homelab/dns-ha-agent`. CI publishes `:latest` as a browse-only pointer; **deployments pin by image digest** (`@sha256:...`).
+1. The agent is built by Woodpecker CI (`ci.bnet.internal`, wired to Forgejo via OAuth — Forgejo's own Actions are deliberately disabled on this instance) and published to the Forgejo container registry at `git.bnet.internal/liamp/dns-ha-agent`. CI publishes `:latest` as a browse-only pointer; **deployments pin by image digest** (`@sha256:...`).
 2. An ansible role (`ansible/roles/dns-ha-agent`) renders a per-node config from `host_vars` and starts the container via docker-compose with `--network host`. The role asserts a digest is set; deploys without one are a hard error.
 3. Per-node config sets the node's name, region, VIP, peer list (other edges' Tailscale IPs), and probe parameters. Single-node regions (currently SHZ-01) deploy with an empty peer list, which automatically disables partition detection.
 4. The agent exposes `/health` (JSON, peer-facing) and `/metrics` (Prometheus) on TCP 8091. The Tailscale ACL restricts inbound to `tag:dns-edge`.

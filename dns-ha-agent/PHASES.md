@@ -11,7 +11,7 @@
 | 2 | HTTP server + observability + BackendProbe | `/health` and `/metrics` endpoints live; JSON logging; per-AGH-backend filter probes feeding metrics |
 | 3 | Peer monitoring + split-brain | Cross-edge peer health probing; PARTITIONED detection |
 | 4 | Liveness + reconciliation | WatchdogThread + startup reconciliation hardening |
-| 5 | CI/CD + digest pinning | Forgejo Actions builds + multi-arch + digest published as artifact |
+| 5 | CI/CD + digest pinning | Woodpecker builds + multi-arch + digest written to the pipeline workspace |
 | 6 | Ansible role | Idempotent deploy role with digest assertion |
 | 7 | v1.0 acceptance (gate to production) | Full v1.0 acceptance criteria passed |
 
@@ -29,7 +29,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - Add Gradle 8.x with Kotlin DSL, Java 21 toolchain, shadow plugin for fat jar.
 - Add `App.java` stub that loads no config, prints a banner, exits.
 - Add multi-stage Dockerfile (`BLUEPRINT.md` §11).
-- Add `.forgejo/workflows/build.yml` skeleton: lint, build, smoke-test.
+- Add `.woodpecker.yml` skeleton (repo root): lint, build, smoke-test.
 - Commit `README.md`, `AGENTS.md`, `BLUEPRINT.md`, `PHASES.md`, `PROGRESS.md` (this doc set).
 
 ### Acceptance criteria
@@ -37,7 +37,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - [ ] `./gradlew shadowJar` produces `build/libs/dns-ha-agent.jar`.
 - [ ] `docker build .` produces a runnable image.
 - [ ] `docker run --rm <image>` prints banner and exits 0.
-- [ ] Forgejo Actions CI runs on push to main and passes.
+- [ ] Woodpecker CI runs on push to main and passes.
 
 ---
 
@@ -162,20 +162,22 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 **Goal**: production-grade build pipeline. Multi-arch images, smoke test by digest, digest exposed as build output.
 
+**Engine correction (2026-08-22)**: this phase was originally scoped for Forgejo Actions. The Forgejo instance actually deployed on the Battlenet rack has Actions deliberately disabled in favor of Woodpecker (see `dns-ha-agent/BLUEPRINT.md` §12). Scope and acceptance criteria below are updated for Woodpecker; the pipeline itself lives at `.woodpecker.yml` (repo root).
+
 ### Scope
 
-- Forgejo Actions workflow `BLUEPRINT.md` §12 fully implemented.
+- Woodpecker pipeline `BLUEPRINT.md` §12 / `.woodpecker.yml` fully implemented.
 - Multi-arch via `docker buildx`: `linux/amd64`, `linux/arm64`.
 - `:latest` tag published as browse pointer.
-- Digest captured as job output (`outputs.digest`) AND as artifact (`digest.txt`).
-- Smoke test job pulls **by digest**, not by `:latest`.
-- Registry secrets configured in Forgejo.
+- Digest captured to a workspace file (`digest.txt`) — Woodpecker has no GitHub-Actions-style job-output mechanism.
+- Smoke test step pulls **by digest**, not by `:latest`.
+- Registry secrets configured in Woodpecker's per-repo secret store.
 
 ### Acceptance criteria
 
 - [ ] CI runs on every push to main; tests pass.
-- [ ] Image is pushed to `forgejo.homelab.internal/homelab/dns-ha-agent` for both architectures.
-- [ ] Build output includes the digest, accessible as `${{ needs.build-and-push.outputs.digest }}` in downstream jobs.
+- [ ] Image is pushed to `git.bnet.internal/liamp/dns-ha-agent` for both architectures.
+- [ ] `build-and-push` writes the digest to `digest.txt`, readable by the `smoke-test` step in the same pipeline run.
 - [ ] Smoke test successfully pulls and runs the image by digest, asserts `/health` returns 200.
 - [ ] `:latest` tag exists in registry but is treated as informational only.
 
@@ -213,7 +215,7 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 - [ ] All unit and integration tests pass in CI.
 - [ ] Smoke test in CI pulls (by digest) and runs the image successfully.
-- [ ] Multi-arch image (`amd64`, `arm64`) published to `forgejo.homelab.internal/homelab/dns-ha-agent`; digest captured as CI build output.
+- [ ] Multi-arch image (`amd64`, `arm64`) published to `git.bnet.internal/liamp/dns-ha-agent`; digest captured as CI build output.
 - [ ] Ansible role asserts digest is set; refuses to deploy without one.
 - [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
 - [ ] **Tailscale socket reachable from container**: after the container starts, `docker exec dns-ha-agent tailscale status` succeeds (proves the LocalAPI socket bind mount works). The compose file must explicitly mount `/var/run/tailscale/tailscaled.sock` — host networking alone does not expose it.
