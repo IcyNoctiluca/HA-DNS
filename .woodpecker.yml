@@ -1,4 +1,4 @@
-# CI for dns-ha-agent, run by Woodpecker (ci.bnet.internal).
+# CI for dns-ha-agent, run by Woodpecker (ci.battlenet.internal).
 #
 # Forgejo Actions is deliberately disabled on the Forgejo instance this repo
 # lives on (actions.ENABLED=false, by name — see the Battlenet infra repo's
@@ -98,7 +98,7 @@ steps:
       # linux/arm64 target (Pi 5 edges) needs QEMU emulation when building
       # on an x86 runner (H1).
       - docker run --rm --privileged tonistiigi/binfmt --install all
-      - echo "$REGISTRY_TOKEN" | docker login git.bnet.internal -u "$REGISTRY_USER" --password-stdin
+      - echo "$REGISTRY_TOKEN" | docker login git.battlenet.internal -u "$REGISTRY_USER" --password-stdin
       # Deliberately NOT `docker buildx create` + `buildx build --platform
       # a,b --push` in one shot: that spins up a *separate* BuildKit
       # container (docker-container driver) which is created by the dind
@@ -110,14 +110,14 @@ steps:
       # `docker manifest`, below, stays entirely inside containers Woodpecker
       # itself created, so the same CA trust that made `docker login` work
       # applies throughout.
-      - docker build --platform linux/amd64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest-amd64 dns-ha-agent
-      - docker push git.bnet.internal/liamp/dns-ha-agent:latest-amd64
-      - docker build --platform linux/arm64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest-arm64 dns-ha-agent
-      - docker push git.bnet.internal/liamp/dns-ha-agent:latest-arm64
+      - docker build --platform linux/amd64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 dns-ha-agent
+      - docker push git.battlenet.internal/liamp/dns-ha-agent:latest-amd64
+      - docker build --platform linux/arm64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-arm64 dns-ha-agent
+      - docker push git.battlenet.internal/liamp/dns-ha-agent:latest-arm64
       # :latest published as a convenience pointer ONLY.
       # Ansible deploys pin by digest, not by :latest.
-      - docker manifest create git.bnet.internal/liamp/dns-ha-agent:latest git.bnet.internal/liamp/dns-ha-agent:latest-amd64 git.bnet.internal/liamp/dns-ha-agent:latest-arm64
-      - docker manifest push git.bnet.internal/liamp/dns-ha-agent:latest > /tmp/manifest-push.out
+      - docker manifest create git.battlenet.internal/liamp/dns-ha-agent:latest git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 git.battlenet.internal/liamp/dns-ha-agent:latest-arm64
+      - docker manifest push git.battlenet.internal/liamp/dns-ha-agent:latest > /tmp/manifest-push.out
       - cat /tmp/manifest-push.out
       - grep -o 'sha256:[a-f0-9]*' /tmp/manifest-push.out | head -1 > digest.txt
       - 'echo "Built digest: $(cat digest.txt)"'
@@ -169,7 +169,7 @@ steps:
       # so it's not simply "each list item is a separate shell". Maximal
       # debug below to see the raw bytes at the exact point of failure
       # before guessing further.
-      - od -An -c digest.txt | head -3 && wc -c digest.txt && DIGEST=$(cat digest.txt) && echo "RAWDIGEST=[$DIGEST]" && IMAGE="git.bnet.internal/liamp/dns-ha-agent@${DIGEST}" && echo "RAWIMAGE=[$IMAGE]" && docker pull "$IMAGE" && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
+      - od -An -c digest.txt | head -3 && wc -c digest.txt && DIGEST=$(cat digest.txt) && echo "RAWDIGEST=[$DIGEST]" && IMAGE="git.battlenet.internal/liamp/dns-ha-agent@${DIGEST}" && echo "RAWIMAGE=[$IMAGE]" && docker pull "$IMAGE" && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
       - |
         status=1
         for i in $(seq 1 12); do

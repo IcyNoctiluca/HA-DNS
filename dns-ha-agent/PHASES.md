@@ -176,7 +176,7 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 ### Acceptance criteria
 
 - [ ] CI runs on every push to main; tests pass.
-- [ ] Image is pushed to `git.bnet.internal/liamp/dns-ha-agent` for both architectures.
+- [ ] Image is pushed to `git.battlenet.internal/liamp/dns-ha-agent` for both architectures.
 - [ ] `build-and-push` writes the digest to `digest.txt`, readable by the `smoke-test` step in the same pipeline run.
 - [ ] Smoke test successfully pulls and runs the image by digest, asserts `/health` returns 200.
 - [ ] `:latest` tag exists in registry but is treated as informational only.
@@ -215,7 +215,7 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 - [ ] All unit and integration tests pass in CI.
 - [ ] Smoke test in CI pulls (by digest) and runs the image successfully.
-- [ ] Multi-arch image (`amd64`, `arm64`) published to `git.bnet.internal/liamp/dns-ha-agent`; digest captured as CI build output.
+- [ ] Multi-arch image (`amd64`, `arm64`) published to `git.battlenet.internal/liamp/dns-ha-agent`; digest captured as CI build output.
 - [ ] Ansible role asserts digest is set; refuses to deploy without one.
 - [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
 - [ ] **Tailscale socket reachable from container**: after the container starts, `docker exec dns-ha-agent tailscale status` succeeds (proves the LocalAPI socket bind mount works). The compose file must explicitly mount `/var/run/tailscale/tailscaled.sock` — host networking alone does not expose it.
