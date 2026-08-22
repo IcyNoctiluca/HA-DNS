@@ -97,17 +97,28 @@ steps:
       # linux/arm64 target (Pi 5 edges) needs QEMU emulation when building
       # on an x86 runner (H1).
       - docker run --rm --privileged tonistiigi/binfmt --install all
-      # network=host: the buildx builder container otherwise gets its own
-      # network namespace with public DNS (8.8.8.8), which can't resolve
-      # git.bnet.internal -- found live when the multi-arch build succeeded
-      # but the push failed on DNS lookup. Sharing the dind service's own
-      # netns (which has the cluster's internal DNS) fixes it.
-      - docker buildx create --use --driver-opt network=host
       - echo "$REGISTRY_TOKEN" | docker login git.bnet.internal -u "$REGISTRY_USER" --password-stdin
+      # Deliberately NOT `docker buildx create` + `buildx build --platform
+      # a,b --push` in one shot: that spins up a *separate* BuildKit
+      # container (docker-container driver) which is created by the dind
+      # daemon, not by Woodpecker itself, so it never gets the CA bundle
+      # Woodpecker mounts into every container IT creates -- confirmed live
+      # (docker login above succeeded; the buildx-created container's own
+      # push failed with "certificate signed by unknown authority"). Building
+      # per-arch with the default (daemon-embedded) driver and combining with
+      # `docker manifest`, below, stays entirely inside containers Woodpecker
+      # itself created, so the same CA trust that made `docker login` work
+      # applies throughout.
+      - docker build --platform linux/amd64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest-amd64 dns-ha-agent
+      - docker push git.bnet.internal/liamp/dns-ha-agent:latest-amd64
+      - docker build --platform linux/arm64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest-arm64 dns-ha-agent
+      - docker push git.bnet.internal/liamp/dns-ha-agent:latest-arm64
       # :latest published as a convenience pointer ONLY.
       # Ansible deploys pin by digest, not by :latest.
-      - docker buildx build --platform linux/amd64,linux/arm64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest --push dns-ha-agent
-      - docker buildx imagetools inspect git.bnet.internal/liamp/dns-ha-agent:latest --format '{{json .Manifest}}' | jq -r '.digest' > digest.txt
+      - docker manifest create git.bnet.internal/liamp/dns-ha-agent:latest git.bnet.internal/liamp/dns-ha-agent:latest-amd64 git.bnet.internal/liamp/dns-ha-agent:latest-arm64
+      - docker manifest push git.bnet.internal/liamp/dns-ha-agent:latest > /tmp/manifest-push.out
+      - cat /tmp/manifest-push.out
+      - grep -o 'sha256:[a-f0-9]*' /tmp/manifest-push.out | head -1 > digest.txt
       - 'echo "Built digest: $(cat digest.txt)"'
     when:
       - event: [push, manual]
