@@ -88,6 +88,7 @@ steps:
     image: docker:24-cli
     environment:
       DOCKER_HOST: tcp://docker:2375
+      DOCKER_CLI_EXPERIMENTAL: enabled
       REGISTRY_USER:
         from_secret: forgejo_registry_user
       REGISTRY_TOKEN:
