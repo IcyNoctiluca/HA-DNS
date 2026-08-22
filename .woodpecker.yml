@@ -73,10 +73,7 @@ steps:
         logging: { format: JSON, level: INFO }
         metrics: { enabled: true, path: /metrics }
         CFG
-      - docker run -d --name ci-smoke --rm
-          -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true
-          -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml
-          dns-ha-agent:ci
+      - docker run -d --name ci-smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml dns-ha-agent:ci
       - sleep 5
       - docker logs ci-smoke
       - docker exec ci-smoke wget -qO- http://127.0.0.1:8091/health | tee /tmp/ci-health.json
@@ -104,12 +101,7 @@ steps:
       - echo "$REGISTRY_TOKEN" | docker login git.bnet.internal -u "$REGISTRY_USER" --password-stdin
       # :latest published as a convenience pointer ONLY.
       # Ansible deploys pin by digest, not by :latest.
-      - docker buildx build
-          --platform linux/amd64,linux/arm64
-          -f dns-ha-agent/Dockerfile
-          -t git.bnet.internal/liamp/dns-ha-agent:latest
-          --push
-          dns-ha-agent
+      - docker buildx build --platform linux/amd64,linux/arm64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest --push dns-ha-agent
       - docker buildx imagetools inspect git.bnet.internal/liamp/dns-ha-agent:latest --format '{{json .Manifest}}' | jq -r '.digest' > digest.txt
       - echo "Built digest: $(cat digest.txt)"
     when:
@@ -156,10 +148,7 @@ steps:
       - DIGEST=$(cat digest.txt)
       - IMAGE="git.bnet.internal/liamp/dns-ha-agent@${DIGEST}"
       - docker pull "$IMAGE"
-      - docker run -d --name smoke --rm
-          -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true
-          -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml"
-          "$IMAGE"
+      - docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
       - |
         status=1
         for i in $(seq 1 12); do
