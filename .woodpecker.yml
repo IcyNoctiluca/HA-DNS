@@ -103,7 +103,7 @@ steps:
       # Ansible deploys pin by digest, not by :latest.
       - docker buildx build --platform linux/amd64,linux/arm64 -f dns-ha-agent/Dockerfile -t git.bnet.internal/liamp/dns-ha-agent:latest --push dns-ha-agent
       - docker buildx imagetools inspect git.bnet.internal/liamp/dns-ha-agent:latest --format '{{json .Manifest}}' | jq -r '.digest' > digest.txt
-      - echo "Built digest: $(cat digest.txt)"
+      - 'echo "Built digest: $(cat digest.txt)"'
     when:
       - event: push
         branch: main
