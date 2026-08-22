@@ -959,7 +959,7 @@ services:
     # Digest is rendered into this file by the ansible role from
     # dns_ha_agent_image_digest, which is bumped on each intentional deploy.
     # Rollback = change the digest var back to a known-good value, redeploy.
-    image: git.bnet.internal/liamp/dns-ha-agent@sha256:DIGEST_HERE
+    image: git.battlenet.internal/liamp/dns-ha-agent@sha256:DIGEST_HERE
     container_name: dns-ha-agent
     restart: unless-stopped
     network_mode: host
@@ -1019,7 +1019,7 @@ Alternative: run the agent as a host systemd service rather than a container. Lo
 
 ## 12. CI/CD (Woodpecker)
 
-**Engine**: [Woodpecker](../../docs/k3s/woodpecker.md) at `ci.bnet.internal`, OAuth-wired to Forgejo. **Not Forgejo Actions** — that's deliberately disabled on this Forgejo instance (`actions.ENABLED=false`, by name, so it can't quietly stand up a competing CI system; see the Battlenet infra repo's `docs/k3s/forgejo.md` §4). An earlier draft of this section assumed Forgejo Actions and used GitHub-Actions-shaped syntax (`uses:`, `runs-on`, job outputs); that was never runnable against the real instance and has been replaced below.
+**Engine**: [Woodpecker](../../docs/k3s/woodpecker.md) at `ci.battlenet.internal`, OAuth-wired to Forgejo. **Not Forgejo Actions** — that's deliberately disabled on this Forgejo instance (`actions.ENABLED=false`, by name, so it can't quietly stand up a competing CI system; see the Battlenet infra repo's `docs/k3s/forgejo.md` §4). An earlier draft of this section assumed Forgejo Actions and used GitHub-Actions-shaped syntax (`uses:`, `runs-on`, job outputs); that was never runnable against the real instance and has been replaced below.
 
 The actual pipeline lives at [`../.woodpecker.yml`](../.woodpecker.yml) (repo root, not `dns-ha-agent/`, since that's where Woodpecker looks by default). Read that file for the literal, current definition — this section is a summary, not a second copy, so the two can't drift.
 
@@ -1043,7 +1043,7 @@ Docker-in-Docker is required because Woodpecker step containers don't get host D
 
 ## 13. Hosting / Registry
 
-- **Registry**: Forgejo's built-in container registry at `git.bnet.internal/liamp/dns-ha-agent`. (No `homelab` org exists on this Forgejo instance — repos and their packages live under the `liamp` user, per the pattern documented in `docs/k3s/forgejo.md` §3 of the Battlenet infra repo.)
+- **Registry**: Forgejo's built-in container registry at `git.battlenet.internal/liamp/dns-ha-agent`. (No `homelab` org exists on this Forgejo instance — repos and their packages live under the `liamp` user, per the pattern documented in `docs/k3s/forgejo.md` §3 of the Battlenet infra repo.)
 - **Visibility**: private, owned by `liamp`.
 - **Auth**: Forgejo personal access token with `write:package` scope, stored as a Woodpecker CI secret (`forgejo_registry_token`). Ansible pulls with a read-only deploy token (separate token, `read:package` scope only).
 - **Tags published**: `:latest` (rolling pointer for browse-only). Deployments pin by `@sha256:DIGEST`.
@@ -1069,7 +1069,7 @@ ansible/roles/dns-ha-agent/
 ### `defaults/main.yml`
 
 ```yaml
-dns_ha_agent_image_repo: git.bnet.internal/liamp/dns-ha-agent
+dns_ha_agent_image_repo: git.battlenet.internal/liamp/dns-ha-agent
 
 # MANDATORY: must be set in group_vars (or per-node host_vars).
 # This is the immutable artifact pin. Bump on intentional deploys; revert
@@ -1344,8 +1344,8 @@ For panic-mode rollback without going through ansible:
 
 ```bash
 # On affected node
-docker image ls git.bnet.internal/liamp/dns-ha-agent --digests
-docker pull git.bnet.internal/liamp/dns-ha-agent@sha256:<previous>
+docker image ls git.battlenet.internal/liamp/dns-ha-agent --digests
+docker pull git.battlenet.internal/liamp/dns-ha-agent@sha256:<previous>
 # Edit /etc/dns-ha-agent/docker-compose.yml to use the previous digest
 docker compose -f /etc/dns-ha-agent/docker-compose.yml up -d
 # Then fix the ansible vars to match, so the next playbook run doesn't undo it
