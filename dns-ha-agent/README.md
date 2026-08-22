@@ -55,7 +55,6 @@ dns-ha-agent/
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── Dockerfile
-├── .forgejo/workflows/build.yml
 ├── ansible/roles/dns-ha-agent/
 ├── config/example.yaml
 └── src/{main,test}/java/io/homelab/dnsha/
