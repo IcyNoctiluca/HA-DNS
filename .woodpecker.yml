@@ -162,11 +162,15 @@ steps:
         EOF
       # Pull and smoke-test BY DIGEST, not :latest — proves the exact
       # artifact Ansible would pin to actually boots.
-      - pwd && ls -la
-      - DIGEST=$(cat digest.txt)
-      - IMAGE="git.bnet.internal/liamp/dns-ha-agent@${DIGEST}"
-      - docker pull "$IMAGE"
-      - docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
+      #
+      # DIGEST/IMAGE/pull/run are one list item, not four: found live that
+      # a shell variable assigned in one `commands:` list item does NOT
+      # survive into the next one (each runs as its own shell invocation --
+      # only the workspace filesystem is actually shared across items, which
+      # is why an earlier debug `cat digest.txt` proved the file itself was
+      # present and correct while a separate `IMAGE=...${DIGEST}` line right
+      # after it still expanded to empty).
+      - DIGEST=$(cat digest.txt) && IMAGE="git.bnet.internal/liamp/dns-ha-agent@${DIGEST}" && docker pull "$IMAGE" && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
       - |
         status=1
         for i in $(seq 1 12); do
