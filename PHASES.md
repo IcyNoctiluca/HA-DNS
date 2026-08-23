@@ -218,7 +218,7 @@ docker restart dns-ha-agent                # agent re-advertises; auto-approves 
 - [ ] `sudo ss -tulpen | grep -E ':53|:5353|:5335|:8091|:3000'` shows the expected port layout (Pi-hole on LAN IP only).
 - [ ] `dig @127.0.0.1 -p 5353 cloudflare.com` returns an A record (local AGH works).
 - [ ] `dig @127.0.0.1 -p 5353 dns-filter-sentinel.<your-public-domain>` returns empty (filtering works).
-- [ ] `dig @127.0.0.1 -p 5335 cloudflare.com +trace` shows the full recursive chain (Unbound is recursing, not forwarding).
+- [ ] `dig @127.0.0.1 -p 5335 +dnssec cloudflare.com` includes the `ad` flag, `dig @127.0.0.1 -p 5335 dnssec-failed.org` returns `SERVFAIL`, and `/etc/unbound/` contains no `forward-zone`, `forward-addr`, or `forward-host` directives (Unbound recurses and validates rather than forwards).
 - [ ] `dig @10.253.53.53 cloudflare.com` resolves via dnsdist (full path works).
 - [ ] `dig @<AMS01_TS_IP> -p 1053 cloudflare.com` resolves via dnsdist's diagnostic listener (same full path, edge-direct).
 - [ ] `dig @<AMS01_TS_IP> -p 1053 dns-filter-sentinel.<your-public-domain>` returns empty (filter active on the diagnostic path).

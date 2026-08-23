@@ -77,8 +77,9 @@ tasks.check {
     // integrationTest is intentionally NOT wired into `check` — it requires a
     // Docker daemon that may not be present on every dev machine / CI runner
     // stage. `./gradlew check` (the required pre-push gate per AGENTS.md)
-    // therefore only runs the fast unit suite. CI's `test` job runs both
-    // explicitly; see .forgejo/workflows/build.yml.
+    // therefore only runs the fast unit suite. Woodpecker CI explicitly runs
+    // both `check` and `integrationTest`; see the repository-root
+    // .woodpecker.yml.
 }
 
 tasks.shadowJar {
