@@ -129,8 +129,18 @@ steps:
     image: docker:24-cli
     environment:
       DOCKER_HOST: tcp://docker:2375
+      REGISTRY_USER:
+        from_secret: forgejo_registry_user
+      REGISTRY_TOKEN:
+        from_secret: forgejo_registry_token
     commands:
       - apk add --no-cache wget jq
+      # `docker login` writes credentials into this container's own
+      # ~/.docker/config.json, not into the shared dind daemon -- found
+      # live as "unauthorized" on pull, since build-and-push's login (a
+      # different container) doesn't carry over. The registry image is
+      # private, so every step that pulls or pushes needs its own login.
+      - echo "$REGISTRY_TOKEN" | docker login git.battlenet.internal -u "$REGISTRY_USER" --password-stdin
       - |
         cat > test-config.yaml <<'EOF'
         version: 1
