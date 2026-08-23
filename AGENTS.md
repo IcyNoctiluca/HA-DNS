@@ -36,7 +36,9 @@ Read this before making any changes to the HA DNS design or rollout. These are i
 - **"Use Tailscale Premium regional routing for better geo-affinity"** — Fine if you're prepared to pay, but the design must work without it. Don't make the free-tier path harder to test.
 - **"Bind the VIP on `eth0` instead of loopback so it's reachable from LAN"** — Tailscale clients reach the VIP via tailnet routing, not LAN. Binding on `eth0` creates ARP conflicts on the local subnet and exposes the HA layer to non-tailnet devices.
 - **"Combine Pi-hole and AGH into one filtering layer"** — They serve different consumers (LAN devices vs tailnet clients) with different metric needs. Pi-hole stays, even though it overlaps with AGH on filtering.
-- **"Run dns-ha-agent under k3s for consistency with other services"** — DNS must not depend on k3s availability. The agent runs as a plain Docker container on the edge nodes.
+- **"Run dns-ha-agent under k3s for consistency with other services"** — the *constraint* is real: DNS must not depend on the k3s control plane. But this was previously written as a ban on the orchestrator, which is the deployment layer's decision, not this repository's (see the homelab repo's "service-blueprint abstraction" rule — service docs stay silent on orchestrator choice). State the constraint, not the mechanism: **no component of this stack may require an API server, scheduler, datastore, overlay network, or cluster DNS in order to start or to keep serving.** Anything satisfying that is acceptable.
+
+  Amsterdam's AdGuard/Unbound backends satisfy it as **kubelet static pods** with `hostNetwork: true`: manifests read off each node's disk, needing no API server, scheduler, etcd, CNI or CoreDNS, and bypassing the pod network entirely. A Deployment or DaemonSet would *not* satisfy it, because scheduling requires the API server. `dns-ha-agent` has an additional constraint a static pod cannot meet — it must run `tailscale set` against the host's `tailscaled` socket — so it remains a plain Docker container on the edge nodes.
 
 ## Operational conventions
 
