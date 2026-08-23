@@ -12,7 +12,7 @@
 
 **Update 2026-08-23**: Pushed Phase 6 (Ansible role) as far as it goes without a real target host: `ansible-lint` now passes clean at the `production` profile (7 real `fqcn` violations fixed), `--syntax-check` passes, and both Jinja templates were confirmed to render correctly against representative values. See `dns-ha-agent/PROGRESS.md`'s 2026-08-23 entry for what that did and didn't verify.
 
-**Update 2026-08-23 (later)**: the backend half of Phase 1 is **deployed and proved on real hardware** in Amsterdam — Unbound live on both `dns-ams-01` (`battlenet-4`) and a newly-added second AMS backend `agh-ams-02` (`battlenet-3`), with AGH declared and blocked only on its admin credential. This partly supersedes the blocker note below: the "real Pi 5 edge hardware" prerequisite **is** in place and is now carrying the backend plane. The public domain for the filter sentinel is still outstanding (an interim `example.com` sentinel is in use). See the 2026-08-23 log entry.
+**Update 2026-08-23 (later)**: the backend half of Phase 1 is **deployed and proved on real hardware** in Amsterdam — both Unbound and AGH live on `dns-ams-01` (`battlenet-4`) and a newly-added second AMS backend `agh-ams-02` (`battlenet-3`). This partly supersedes the blocker note below: the "real Pi 5 edge hardware" prerequisite **is** in place and is now carrying the backend plane. The public domain for the filter sentinel is still outstanding (an interim `example.com` sentinel is in use). See the 2026-08-23 log entry.
 
 **Blockers now**: `dns-ha-agent` Phase 6 (an actual Ansible run/deploy) and Phase 7 (full v1.0 production-acceptance gate) still need a real *target* host running the agent, and Phase 7 additionally needs an edge node with dnsdist and the VIP — which the backend-only deployment deliberately does not provide yet. This repo's Phase 0 prerequisite (a public domain for the filter sentinel) also remains open.
 
@@ -42,14 +42,13 @@
 - **Phase**: Phase 1 — Bootstrap first edge (`dns-ams-01`), **backend half only**
 - **Done**:
   - Deployed Unbound + AdGuard Home on `dns-ams-01` (= `battlenet-4`) and on a **second Amsterdam backend**, `agh-ams-02` (= `battlenet-3`), giving the EU edge a local pool of two — the same shape this design already gives NA with `tor-02`.
-  - Unbound live and proved on both nodes; AGH declared but not yet deployed, blocked on its admin credential.
+  - Both Unbound and AGH live and proved on both nodes. AGH binds exactly `127.0.0.1:5353`, its node's Tailscale address `:5353`, and that address `:3000`; filtering proved by sentinel asymmetry (recursor answers, AGH returns `0.0.0.0`).
   - Deliberately stopped before dnsdist, the `10.253.53.53` VIP, `tag:dns-edge`, and the agent. Nothing on the network resolves through the new plane: Pi-hole still serves the LAN and Tailscale DNS is untouched, so this phase is invisible to every device.
 - **Acceptance criteria touched**: the Unbound and local-resolution items of Phase 1, verified more strictly than the checklist asked (see the step 2a correction below). Everything gated on dnsdist, the VIP or `/health` remains open.
 - **Next**:
-  1. Add the AGH admin bcrypt hash to the homelab repo's `ams_dns` vault, then deploy the AGH half.
-  2. Phase 0: replace the interim `example.com` filter sentinel with a subdomain of a controlled domain carrying a published A record.
-  3. Deploy `adguardhome-sync` on the Mac Studio; until then the two AMS instances drift independently.
-  4. Close the missing third protection layer (below) before dnsdist `:1053` or agent `:8091` exist.
+  1. Phase 0: replace the interim `example.com` filter sentinel with a subdomain of a controlled domain carrying a published A record.
+  2. Deploy `adguardhome-sync` on the Mac Studio; until then the two AMS instances drift independently.
+  3. Close the missing third protection layer (below) before dnsdist `:1053` or agent `:8091` exist.
 - **Notes / anomalies**:
   - **Orchestrator.** The backends run as **kubelet static pods** with `hostNetwork: true`, not plain Docker containers. `AGENTS.md`'s blanket "not under k3s" rule was this repo overstepping into deployment-layer territory; it is now restated as the dependency constraint it was actually protecting — no API server, scheduler, datastore, overlay or cluster DNS in the start-or-serve path — which static pods satisfy and a Deployment/DaemonSet would not. `dns-ha-agent` still cannot be one: it needs the host's `tailscaled` socket.
   - **PHASES.md step 2a was wrong** and is corrected in this commit. `dig +trace` cannot prove a resolver is recursing rather than forwarding — it queries the server under test only for the initial root-NS lookup, then walks the delegation from the client host, so it passes identically against a pure forwarder. The DNSSEC `ad` flag is the real evidence; `dnssec-failed.org` returning SERVFAIL proves it fails closed.
