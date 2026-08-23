@@ -7,7 +7,7 @@
 # fails with the assertion message."
 
 - name: Assert image digest is pinned (no rolling :latest in production)
-  assert:
+  ansible.builtin.assert:
     that:
       - dns_ha_agent_image_digest is defined
       - dns_ha_agent_image_digest | length > 0
@@ -20,7 +20,7 @@
     success_msg: "dns_ha_agent_image_digest is pinned: {{ dns_ha_agent_image_digest }}"
 
 - name: Assert filter sentinel is configured (must match Phase 0 setup)
-  assert:
+  ansible.builtin.assert:
     that:
       - dns_ha_agent_filter_sentinel is defined
       - dns_ha_agent_filter_sentinel | length > 0
@@ -31,7 +31,7 @@
       design (../../AGENTS.md), must not be deployed.
 
 - name: Assert node region is set (required for peer-monitoring config)
-  assert:
+  ansible.builtin.assert:
     that:
       - dns_ha_agent_node_region is defined
       - dns_ha_agent_node_region | length > 0
@@ -40,26 +40,26 @@
       (e.g. "eu"). See ../../BLUEPRINT.md §14 example host_vars.
 
 - name: Ensure config directory exists
-  file:
+  ansible.builtin.file:
     path: "{{ dns_ha_agent_config_dir }}"
     state: directory
     mode: '0755'
 
 - name: Ensure state directory exists
-  file:
+  ansible.builtin.file:
     path: "{{ dns_ha_agent_state_dir }}"
     state: directory
     mode: '0700'
 
 - name: Render agent config
-  template:
+  ansible.builtin.template:
     src: config.yaml.j2
     dest: "{{ dns_ha_agent_config_dir }}/config.yaml"
     mode: '0644'
   notify: Restart dns-ha-agent
 
 - name: Render docker-compose for agent (pinned by digest)
-  template:
+  ansible.builtin.template:
     src: docker-compose.yml.j2
     dest: "{{ dns_ha_agent_compose_dir }}/docker-compose.yml"
     mode: '0644'
