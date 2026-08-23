@@ -157,6 +157,7 @@ Full operational detail — Tailscale API secret handling, per-edge evidence col
 | **DNS edge node** | IOM-01 Pi 5 | IOM-01 | EU | EU secondary edge. Slower WAN but reliable. Advertises VIP; runs dnsdist + dns-ha-agent + AGH. Activates as EU primary when AMS is down. |
 | **DNS edge node** | TOR-01 Pi 5 | TOR-01 | NA | Always-on, 1 Gbps WAN. Sole NA edge. Also runs Pi-hole for TOR-01 LAN. |
 | **DNS edge node** | SHZ-01 Pi 5 | SHZ-01 | APAC | Sole APAC edge. Also runs the only APAC AGH instance. No intra-region failover. Agent runs with zero peers configured (no partition detection). |
+| **AGH backend only** | AMS-01 second Pi 5 | AMS-01 | EU | Second AMS AGH backend, added 2026-08-23. Does not advertise VIP, run dnsdist, or run dns-ha-agent. Gives the AMS edge a same-site backend so a single AGH failure does not push EU traffic across the Channel — the same shape TOR-02 gives NA. Does **not** protect against an AMS-wide power loss, which is what dns-iom-01 is for. |
 | **AGH backend only** | TOR-02 Pi 5 | TOR-02 | NA | NA AGH backend. Does not advertise VIP, run dnsdist, or run dns-ha-agent. Also runs Pi-hole for TOR-02 LAN. |
 | **AGH backend only (future)** | HOU-01 Pi 5 | HOU-01 | NA | NA AGH backend once provisioned. Does not advertise VIP. Candidate for Technitium evaluation — see Appendix G. |
 | **AGH config sync daemon** | Mac Studio | AMS-01 | — | Runs adguardhome-sync in Docker (OrbStack). Pulls from dns-ams-01 AGH, pushes to all replicas globally. |
@@ -203,9 +204,9 @@ Pi-hole's upstream is set to `127.0.0.1#5335` (local Unbound). AGH's upstream is
 AGH backends are organised by region. Each DNS edge routes only to AGH instances within its own region — a regional AGH outage does not affect other regions. All AGH instances remain globally identical for filtering behaviour via adguardhome-sync; only the routing is regional.
 
 ```
-EU region  — 2 edges, 2 AGH backends
-  dns-ams-01 (NL)  →  pool: agh-ams-01 (order=10), agh-iom-01 (order=20)
-  dns-iom-01 (IOM) →  pool: agh-iom-01 (order=10), agh-ams-01 (order=20)
+EU region  — 2 edges, 3 AGH backends
+  dns-ams-01 (NL)  →  pool: agh-ams-01 (order=10), agh-ams-02 (order=20), agh-iom-01 (order=30)
+  dns-iom-01 (IOM) →  pool: agh-iom-01 (order=10), agh-ams-01 (order=20), agh-ams-02 (order=30)
 
 NA region  — 1 edge, 3 AGH backends
   dns-tor-01 (TOR) →  pool: agh-tor-01 (order=10), agh-tor-02 (order=20), agh-hou-01 (order=30, future)
@@ -229,6 +230,7 @@ All AGH instances are kept globally identical by adguardhome-sync — same block
 ```
 dns-ams-01 AGH   ← primary (make all config changes here)
       ↓  adguardhome-sync (Mac Studio Docker, global sync)
+agh-ams-02 AGH   ← EU replica (same site as the primary)
 dns-iom-01 AGH   ← EU replica
 dns-tor-01 AGH   ← NA replica
 dns-tor-02 AGH   ← NA replica
@@ -247,11 +249,13 @@ Each edge's dnsdist routes only to its regional AGH pool. There is no unfiltered
 ```
 dns-ams-01 pool (EU):
   agh-ams-01  →  127.0.0.1:5353      (local, order=10)
-  agh-iom-01  →  IOM01_TS_IP:5353   (order=20)
+  agh-ams-02  →  AMS02_TS_IP:5353   (order=20, same site — see note below)
+  agh-iom-01  →  IOM01_TS_IP:5353   (order=30)
 
 dns-iom-01 pool (EU):
   agh-iom-01  →  127.0.0.1:5353      (local, order=10)
   agh-ams-01  →  AMS01_TS_IP:5353   (order=20)
+  agh-ams-02  →  AMS02_TS_IP:5353   (order=30)
 
 dns-tor-01 pool (NA):
   agh-tor-01  →  127.0.0.1:5353      (local, order=10)
@@ -386,6 +390,7 @@ Set hostnames before Tailscale enrolment so MagicDNS names are clean:
 | `dns-iom-01` | IOM-01 Pi 5 | EU secondary edge |
 | `dns-tor-01` | TOR-01 Pi 5 | NA edge |
 | `dns-shz-01` | SHZ-01 Pi 5 | APAC edge |
+| `agh-ams-02` | AMS-01 second Pi 5 | EU AGH backend only (no VIP, no dnsdist, no agent) |
 | `dns-tor-02` | TOR-02 Pi 5 | NA AGH backend only (no VIP, no dnsdist, no agent) |
 | `dns-hou-01` | HOU-01 Pi 5 (future) | NA AGH backend only |
 
