@@ -19,6 +19,37 @@ Read this before making any changes to the HA DNS design or rollout. These are i
 | "I want to change AGH config" | `BLUEPRINT.md` §AdGuard Home Backend Pool (always change on dns-ams-01; let adguardhome-sync propagate) |
 | "I need to debug the agent" | `dns-ha-agent/AGENTS.md` |
 
+## Git remotes — Forgejo is the working remote
+
+This repo has two remotes, and they are **not** interchangeable:
+
+- **`battlenet`** (`ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git`) — the working remote. Push here directly, on `main`, as normal. This is what Woodpecker CI (`ci.battlenet.internal`) actually watches and builds from — see `dns-ha-agent/BLUEPRINT.md` §12. `main`'s upstream and `remote.pushDefault` are both configured to `battlenet`, so a bare `git push` / `git pull` with no remote named already does the right thing.
+- **`origin`** (`git@github.com:IcyNoctiluca/HA-DNS.git`) — a periodic mirror, not a working remote. **Never push commits to `origin/main` directly.** Update it only via a PR, and only when there's a real milestone worth publishing (not on every small fix) — see below.
+
+If `git push`/`git pull` fails to resolve `git.battlenet.internal` from a sandboxed environment (a known intermittent issue with some setups' local DNS resolver — `nslookup` may still succeed even when `ssh`/`git` don't), tunnel through a host that can reach it directly rather than fighting the resolver:
+
+```bash
+GIT_SSH_COMMAND='ssh -o ProxyCommand="ssh liampi@battlenet-1 -W %h:%p"' git push battlenet main
+```
+
+### Mirroring to GitHub
+
+Do this in an isolated worktree + branch, not on the shared working copy's `main` — other sessions may be actively committing there.
+
+```bash
+git worktree add /path/to/some/worktree -b claude/<topic> battlenet/main
+cd /path/to/some/worktree
+git push origin claude/<topic>
+gh pr create --title "..." --body "..."
+gh pr merge --squash   # squash: battlenet/main's history is often granular
+                        # (one commit per fix found live); GitHub's main
+                        # should read as a clean, reviewable summary instead.
+```
+
+`origin/main` and `battlenet/main` can end up with independently-created commits carrying the *same content* but different hashes (this has actually happened — GitHub received a hand-pushed copy of some fixes while `battlenet` kept its own commit-per-fix trail). If `gh pr view --json mergeable` reports `CONFLICTING` for a reason that looks like this rather than a real content conflict, `git rebase origin/main` on the PR branch before force-pushing it — don't assume it's a genuine conflict to resolve by hand.
+
+Clean up afterward: `git worktree remove <path>`, delete the merged branch both locally and on `origin`.
+
 ## Invariants — never violate
 
 1. **The HA DNS VIP is `10.253.53.53/32`**. Not a different `/32` in `10.253.53.0/24`. Not a `/24`. Mixed prefix lengths break Tailscale's HA failover guarantee.
