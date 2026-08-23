@@ -80,9 +80,25 @@ sudo curl -o /var/lib/unbound/root.hints https://www.internic.net/domain/named.c
 sudo systemctl enable --now unbound
 
 # 2a. VERIFY Unbound is doing recursive resolution (not silently forwarding).
-dig @127.0.0.1 -p 5335 cloudflare.com +trace
-# Expected: full root → TLD → authoritative chain.
-# Fix if not: check /etc/unbound/unbound.conf.d/ for any forward-zone blocks and remove.
+#
+# CORRECTED 2026-08-23: this step used to be `dig ... +trace`, which cannot
+# prove it. `+trace` queries the server under test only for the initial
+# root-NS lookup and then walks the delegation from the *client* host, so it
+# passes identically against a pure forwarder.
+#
+# The DNSSEC `ad` flag is the real evidence: it is set only when the answering
+# resolver built and validated the chain itself, which requires fetching DS and
+# DNSKEY records down the delegation path.
+dig @127.0.0.1 -p 5335 +dnssec cloudflare.com | grep 'flags:'
+# Expected: `flags: qr rd ra ad` — the `ad` is the one that matters.
+
+dig @127.0.0.1 -p 5335 dnssec-failed.org
+# Expected: status: SERVFAIL — validation fails closed rather than passing
+# through a bogus signature.
+
+grep -rE '^\s*(forward-zone|forward-addr|forward-host):' /etc/unbound/
+# Expected: no output. Any forwarder here makes the resolver a proxy for a
+# third party, which is the dependency this component exists to remove.
 
 # 3. Set Pi-hole upstream to local Unbound (web UI)
 #    Settings → DNS → Custom upstream: 127.0.0.1#5335
