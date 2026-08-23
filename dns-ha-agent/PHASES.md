@@ -175,11 +175,13 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 ### Acceptance criteria
 
-- [ ] CI runs on every push to main; tests pass.
-- [ ] Image is pushed to `git.battlenet.internal/liamp/dns-ha-agent` for both architectures.
-- [ ] `build-and-push` writes the digest to `digest.txt`, readable by the `smoke-test` step in the same pipeline run.
-- [ ] Smoke test successfully pulls and runs the image by digest, asserts `/health` returns 200.
-- [ ] `:latest` tag exists in registry but is treated as informational only.
+- [x] CI runs on every push to main; tests pass. **Proved 2026-08-22, pipeline #14: https://ci.battlenet.internal/repos/5/pipeline/14**
+- [x] Image is pushed to `git.battlenet.internal/liamp/dns-ha-agent` for both architectures. (`latest-amd64`, `latest-arm64`, both pushed by `build-and-push`.)
+- [x] `build-and-push` writes the digest to `digest.txt`, readable by the `smoke-test` step in the same pipeline run.
+- [x] Smoke test successfully pulls and runs the image by digest, asserts `/health` returns 200. Digest `sha256:c1e7417f9825d19d411434c564f01afeb2b4d6bc9421503794f6c7f82ee9a3ad` pulled and booted; `/health` returned valid JSON matching `BLUEPRINT.md` §6.
+- [x] `:latest` tag exists in registry but is treated as informational only.
+
+**Phase 5 complete as of 2026-08-22.** See `PROGRESS.md`'s 2026-08-22 entry for the two real bugs found and fixed to get here (Woodpecker's compile-time `${VAR}` substitution, and per-step-container registry auth).
 
 ---
 
