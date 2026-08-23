@@ -26,9 +26,15 @@ services:
 steps:
   test:
     image: eclipse-temurin:21-jdk-jammy
+    environment:
+      # Testcontainers integration tests use the same DinD service as the
+      # image-build steps.  Woodpecker step containers do not have the
+      # runner's Unix Docker socket, so without this explicit endpoint they
+      # would either fail to start or be silently omitted from the CI gate.
+      DOCKER_HOST: tcp://docker:2375
     commands:
       - cd dns-ha-agent
-      - ./gradlew --no-daemon check
+      - ./gradlew --no-daemon check integrationTest
     when:
       - event: [push, pull_request, manual]
 
