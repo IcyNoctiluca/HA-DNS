@@ -163,13 +163,19 @@ steps:
       # Pull and smoke-test BY DIGEST, not :latest — proves the exact
       # artifact Ansible would pin to actually boots.
       #
-      # Combining DIGEST/IMAGE/pull/run into one list item did NOT fix an
-      # earlier empty-digest failure even though build-and-push's own log
-      # showed digest.txt written with correct content moments before --
-      # so it's not simply "each list item is a separate shell". Maximal
-      # debug below to see the raw bytes at the exact point of failure
-      # before guessing further.
-      - od -An -c digest.txt | head -3 && wc -c digest.txt && DIGEST=$(cat digest.txt) && echo "RAWDIGEST=[$DIGEST]" && IMAGE="git.battlenet.internal/liamp/dns-ha-agent@${DIGEST}" && echo "RAWIMAGE=[$IMAGE]" && docker pull "$IMAGE" && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
+      # Root cause of the empty-digest failures (found live, after ruling
+      # out cross-step sharing and per-item shell isolation): Woodpecker's
+      # own pipeline compiler substitutes ${VAR} in commands: strings at
+      # compile time, from ITS template context (built-ins, `environment:`
+      # values) -- not the shell's runtime state. `DIGEST` only ever exists
+      # as a shell variable, so `${DIGEST}` was silently rewritten to an
+      # empty string before the shell ever ran the line (confirmed: the
+      # debug echo of $DIGEST via $(...) command substitution showed the
+      # correct value, while the very next `${DIGEST}` in the same line was
+      # already empty). `$DIGEST` (no braces) isn't Woodpecker's
+      # substitution syntax, so the shell alone resolves it, at runtime, as
+      # intended.
+      - DIGEST=$(cat digest.txt) && IMAGE="git.battlenet.internal/liamp/dns-ha-agent@$DIGEST" && docker pull "$IMAGE" && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
       - |
         status=1
         for i in $(seq 1 12); do
