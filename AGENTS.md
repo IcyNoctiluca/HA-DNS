@@ -36,6 +36,8 @@ GIT_SSH_COMMAND='ssh -o ProxyCommand="ssh liampi@battlenet-1 -W %h:%p"' git push
 
 Do this in an isolated worktree + branch, not on the shared working copy's `main` — other sessions may be actively committing there.
 
+When the user asks for changes to be merged (including a request to commit them in a new worktree, resolve conflicts, create a PR, and merge it), treat this as the standard PR workflow: use an isolated worktree and topic branch, commit the scoped changes, rebase on the target's current `main` and resolve genuine conflicts, push the branch, create the PR, squash-merge it, then clean up. This is explicit authorization for those PR actions. It does not replace the normal direct-push workflow for routine `battlenet/main` changes; use the PR workflow for the `origin` mirror or whenever the user specifically requests a PR merge.
+
 ```bash
 git worktree add /path/to/some/worktree -b claude/<topic> battlenet/main
 cd /path/to/some/worktree
