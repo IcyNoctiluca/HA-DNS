@@ -37,6 +37,21 @@
 
 <!-- Append real entries below this line, newest first. Remove this comment when first entry is added. -->
 
+### 2026-08-26 — Repository review and deployment-role hardening
+
+- **Phase**: `dns-ha-agent` Phase 6 — static implementation hardening
+- **Done**:
+  - Confirmed the working Git/CI path is local Forgejo (`git.battlenet.internal`) plus Woodpecker (`ci.battlenet.internal`); GitHub remains a mirror only.
+  - Corrected stale top-level and agent README status text: the agent is implemented and locally CI-tested, but production deployment remains gated on a real edge canary and Phase 0's controlled filter sentinel.
+  - Added an idempotent `Ensure compose directory exists` task to the Ansible role. This closes the first-deploy failure when `dns_ha_agent_compose_dir` is overridden independently of `dns_ha_agent_config_dir`.
+  - Corrected the agent convention that inaccurately banned all VIP queries: only the intentional local-stack health probe may query the VIP; no bootstrap or ordinary resolver dependency may do so.
+- **Acceptance criteria touched**: none claimed complete — Phase 6 still requires an actual target-host run.
+- **Next**:
+  1. Configure a real controlled filter-sentinel domain and AGH block rule (top-level Phase 0).
+  2. Run the digest-pinned Ansible canary against `dns-ams-01`, then execute Phase 6/7 acceptance checks.
+- **Notes / anomalies**:
+  - Local Gradle verification remains unavailable in this sandbox because the Gradle wrapper cannot resolve `services.gradle.org`; Woodpecker is already the proven, local build/test authority.
+
 ### 2026-08-23 — Amsterdam backend plane (Phase 1, steps 0-4 only)
 
 - **Phase**: Phase 1 — Bootstrap first edge (`dns-ams-01`), **backend half only**
@@ -59,5 +74,4 @@
   - Deployment-layer detail lives in the homelab repo: `docs/operations/tailnet-ha-dns.md`.
 
 ---
-
 
