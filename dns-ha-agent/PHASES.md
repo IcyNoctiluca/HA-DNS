@@ -175,7 +175,7 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 ### Acceptance criteria
 
-- [x] CI runs on every push to main; tests pass. **Proved 2026-08-22, pipeline #14: https://ci.battlenet.internal/repos/5/pipeline/14** — via a manually-triggered pipeline run. **Caveat added 2026-08-23**: the Forgejo→Woodpecker webhook meant to make this automatic is currently blocked by Forgejo's own `webhook.ALLOWED_HOST_LIST` (an infra-level fix in the Battlenet repo, not here — see `PROGRESS.md`'s 2026-08-23 entry). The pipeline logic itself is proven; auto-trigger-on-push is not, yet.
+- [x] CI runs on every push to main; tests pass. Pipeline #14 (2026-08-22) proved the pipeline logic end-to-end. The Battlenet infrastructure then set Forgejo's narrowly scoped `webhook.ALLOWED_HOST_LIST` to `external,*.battlenet.internal`; a real HA-DNS push created Woodpecker push-event pipeline #16 unattended on 2026-08-23. Auto-trigger-on-push is therefore proved as well.
 - [x] Image is pushed to `git.battlenet.internal/liamp/dns-ha-agent` for both architectures. (`latest-amd64`, `latest-arm64`, both pushed by `build-and-push`.)
 - [x] `build-and-push` writes the digest to `digest.txt`, readable by the `smoke-test` step in the same pipeline run.
 - [x] Smoke test successfully pulls and runs the image by digest, asserts `/health` returns 200. Digest `sha256:c1e7417f9825d19d411434c564f01afeb2b4d6bc9421503794f6c7f82ee9a3ad` pulled and booted; `/health` returned valid JSON matching `BLUEPRINT.md` §6.
