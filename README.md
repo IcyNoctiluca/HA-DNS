@@ -4,7 +4,9 @@ Design and rollout documentation for the highly-available DNS layer of the homel
 
 ## Status
 
-Design complete (v3). Rollout pending; the dependent `dns-ha-agent` service is unimplemented.
+The design is complete. Amsterdam's Unbound + AdGuard Home backend plane is deployed and verified; the edge/VIP half remains gated on a controlled filter-sentinel domain and a canary edge deployment. `dns-ha-agent` is implemented through its local CI/CD pipeline, with live Ansible deployment and the final production gate still pending.
+
+Forgejo at `git.battlenet.internal` is the working Git server and Woodpecker at `ci.battlenet.internal` is the CI system. GitHub is a periodic mirror only.
 
 ## Document Map
 

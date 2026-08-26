@@ -51,6 +51,12 @@
     state: directory
     mode: '0700'
 
+- name: Ensure compose directory exists
+  ansible.builtin.file:
+    path: "{{ dns_ha_agent_compose_dir }}"
+    state: directory
+    mode: '0755'
+
 - name: Render agent config
   ansible.builtin.template:
     src: config.yaml.j2

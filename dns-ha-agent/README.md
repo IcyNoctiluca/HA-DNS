@@ -6,7 +6,7 @@ One instance runs on every edge node in the homelab's HA DNS topology. Same imag
 
 ## Status
 
-**Blueprint complete (v2). Implementation pending.**
+**Implementation complete through the CI/CD phase.** Woodpecker builds and tests the agent on the local Battlenet Forgejo server, publishes multi-architecture images to the Forgejo registry, and smoke-tests the pushed image by digest. The Ansible role and final production acceptance gate still require a real edge-host canary.
 
 The acceptance criteria for v1.0 are defined as the last phase in [`PHASES.md`](PHASES.md).
 
@@ -25,7 +25,7 @@ Concretely, the agent is the **sole authority** for mutating Tailscale route adv
 | [`PROGRESS.md`](PROGRESS.md) | Append-only execution log. Read this to see what's been done. |
 | [`AGENTS.md`](AGENTS.md) | Coding conventions, invariants, and "do not touch" rules for agents (human or otherwise) working on this codebase. Read first before making any changes. |
 
-## Quick start (when implementation is underway)
+## Quick start
 
 ```bash
 # Build
@@ -41,6 +41,9 @@ docker run --rm --network host \
 
 # Run tests
 ./gradlew check
+
+# Run the Testcontainers integration suite (requires Docker)
+./gradlew integrationTest
 ```
 
 ## Repo layout (planned)
