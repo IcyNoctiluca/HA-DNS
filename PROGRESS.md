@@ -6,7 +6,12 @@
 
 ## Status
 
-**Current phase**: Phase 1 in progress — the **backend half** (Unbound + AGH) is deployed in Amsterdam as of 2026-08-23; the edge half (dnsdist, VIP, `tag:dns-edge`, the agent) is not. `dns-ha-agent` Phase 5 proved live; its Phase 6/7 remain.
+**Current phase**: Phase 1 in progress — the **backend half** (Unbound + AGH)
+is deployed in Amsterdam as of 2026-08-23; the edge half (dnsdist, VIP,
+`tag:dns-edge`, the agent) is not. Phase 0's controlled DNS record and the
+primary AGH block rule now exist, but the replica has not yet received that
+rule because the credential-gated sync daemon is not deployed. `dns-ha-agent`
+Phase 5 proved live; its Phase 6/7 remain.
 
 **Update 2026-08-22**: Liam stood up real infra (Forgejo + Woodpecker at `git.battlenet.internal` / `ci.battlenet.internal`), and `dns-ha-agent`'s CI pipeline ran green end-to-end for the first time ever — Phase 5 (CI/CD + digest pinning) acceptance criteria are now all met, closing out a blocker that had stood since design. Two real bugs (Woodpecker's compile-time `${VAR}` substitution silently blanking the digest; per-step-container registry auth) were found and fixed live, not by further static review. See `dns-ha-agent/PROGRESS.md`'s 2026-08-22 entry for full detail and `dns-ha-agent/PHASES.md` for the closed-out checklist.
 
@@ -14,7 +19,13 @@
 
 **Update 2026-08-23 (later)**: the backend half of Phase 1 is **deployed and proved on real hardware** in Amsterdam — both Unbound and AGH live on `dns-ams-01` (`battlenet-4`) and a newly-added second AMS backend `agh-ams-02` (`battlenet-3`). This partly supersedes the blocker note below: the "real Pi 5 edge hardware" prerequisite **is** in place and is now carrying the backend plane. The public domain for the filter sentinel is still outstanding (an interim `example.com` sentinel is in use). See the 2026-08-23 log entry.
 
-**Blockers now**: `dns-ha-agent` Phase 6 (an actual Ansible run/deploy) and Phase 7 (full v1.0 production-acceptance gate) still need a real *target* host running the agent, and Phase 7 additionally needs an edge node with dnsdist and the VIP — which the backend-only deployment deliberately does not provide yet. This repo's Phase 0 prerequisite (a public domain for the filter sentinel) also remains open.
+**Blockers now**: The Studio needs the existing AGH admin plaintext admitted to
+an encrypted Ansible vault before `adguardhome-sync` can copy the primary's
+rule to `agh-ams-02`. Separately, the edge half needs a scoped, persistent
+host-firewall design that coexists with the Amsterdam nodes' k3s-managed
+nftables state before sensitive `:1053` and `:8091` listeners are introduced.
+Only after those gates can `dns-ha-agent` Phase 6 (an actual Ansible
+run/deploy) and Phase 7 (full v1.0 production acceptance) begin.
 
 **Prior update, 2026-07-21 20:44 UTC**: the "unconfirmed fresh run" blocker is now cleared — 126/126 unit tests confirmed green (0 failures, 0 errors) at commit `e12bafd`, verified this session by reading the JUnit XML reports directly (no sandboxed session has ever had Docker access to produce this run itself; the run happened just before this session started and was cross-checked for freshness against HEAD). Treat Phases 0-4 as build-and-unit-test-verified; the Testcontainers/Docker-dependent integration-test suites remain unrun in any sandbox. This session additionally found and fixed a real bug in the Ansible role (missing `ansible.cfg` meant the role couldn't be found via its own documented invocation) plus two `ansible-lint` nits; see `dns-ha-agent/PROGRESS.md` 2026-07-21 (20:44 UTC) entry for detail.
 
@@ -35,7 +46,40 @@
 
 ---
 
-<!-- Append real entries below this line, newest first. Remove this comment when first entry is added. -->
+### 2026-08-27 — Controlled filter sentinel and sync deployment prepared
+
+- **Phase**: Phase 0 / Phase 1 backend readiness
+- **Done**:
+  - The operator published `dns.l-p.dev` as a DNS-only public A record for
+    `192.0.2.53` and added the exact block rule to the primary
+    (`agh-ams-01` / `battlenet-4`).
+  - Live backend probes proved the intended asymmetry on the primary: local
+    Unbound returns `192.0.2.53`; AGH returns `0.0.0.0`. The secondary's AGH
+    still returned `192.0.2.53`, correctly exposing the current configuration
+    drift rather than falsely treating the sentinel as complete.
+  - A checksum-pinned native macOS `adguardhome-sync` LaunchAgent and a
+    post-deploy proof were prepared in the Battlenet deployment repository
+    (local commit `8abbb63`). The service has no API listener and uses
+    MagicDNS only to reach the two tailnet-bound AGH admin endpoints.
+  - Read-only Studio probes confirmed ARM64/launchd readiness and both AGH
+    admin endpoints return unauthenticated `401`; the transport path is ready.
+  - Read-only firewall inspection confirmed UFW/firewalld are absent and the
+    two backends already carry k3s-managed nftables/iptables rules, so a
+    generic UFW installation was intentionally not attempted.
+- **Acceptance criteria touched**: Phase 0 public-record and primary-rule
+  prerequisites proved. Replica propagation and shared response-shape proof
+  remain open.
+- **Next**:
+  1. Add `vault_adguard_home_sync_admin_password` to the encrypted Studio
+     Ansible vault from the password manager, then deploy and prove sync.
+  2. Design and rehearse a narrow persistent firewall mechanism compatible
+     with k3s before introducing dnsdist `:1053` or agent `:8091`.
+  3. Apply the agent canary only after both gates pass.
+- **Notes / anomalies**:
+  - The bcrypt hash that seeded AGH is deliberately insufficient for the AGH
+    API; it cannot be reversed or re-used by the sync service.
+  - No replica was edited directly, preserving the primary-only configuration
+    ownership boundary.
 
 ### 2026-08-26 — Repository review and deployment-role hardening
 
@@ -74,4 +118,3 @@
   - Deployment-layer detail lives in the homelab repo: `docs/operations/tailnet-ha-dns.md`.
 
 ---
-
