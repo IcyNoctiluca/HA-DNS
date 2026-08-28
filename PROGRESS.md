@@ -19,6 +19,8 @@ Phase 5 proved live; its Phase 6/7 remain.
 
 **Update 2026-08-23 (later)**: the backend half of Phase 1 is **deployed and proved on real hardware** in Amsterdam — both Unbound and AGH live on `dns-ams-01` (`battlenet-4`) and a newly-added second AMS backend `agh-ams-02` (`battlenet-3`). This partly supersedes the blocker note below: the "real Pi 5 edge hardware" prerequisite **is** in place and is now carrying the backend plane. The public domain for the filter sentinel is still outstanding (an interim `example.com` sentinel is in use). See the 2026-08-23 log entry.
 
+**Update 2026-08-28**: Git remotes flipped — GitHub (`IcyNoctiluca/HA-DNS`) is now canonical; Forgejo is a mirror that every `git push` writes to in the same operation. Woodpecker still builds from the Forgejo copy. See the 2026-08-28 log entry and `AGENTS.md` §"Git remotes".
+
 **Blockers now**: The Studio needs the existing AGH admin plaintext admitted to
 an encrypted Ansible vault before `adguardhome-sync` can copy the primary's
 rule to `agh-ams-02`. Separately, the edge half needs a scoped, persistent
@@ -43,6 +45,42 @@ run/deploy) and Phase 7 (full v1.0 production acceptance) begin.
   - (what comes next, in order)
 - **Notes / anomalies**:
   - (anything surprising, decisions made, deviations from BLUEPRINT)
+
+---
+
+### 2026-08-28 — Git remote flip: GitHub canonical, Forgejo mirrored
+
+- **Phase**: Infrastructure / repo hosting (no DNS-design change)
+- **Done**:
+  - Reversed the remote roles. GitHub (`IcyNoctiluca/HA-DNS`) is now the
+    canonical remote; the homelab Forgejo is a mirror, so the homelab is no
+    longer the system of record for the source.
+  - Seeded GitHub `main` from the true current state (`63e8283`) with a
+    one-time force-push, replacing GitHub's stale divergent history (was
+    `3387724`, ~5 commits behind on content with its own squash-merge PR
+    trail). Histories are unified from here on.
+  - `origin` now fetches from GitHub and has two push URLs (GitHub first, then
+    Forgejo); one `git push origin` writes to both. `remote.pushDefault` and
+    `branch.main.remote` set to `origin`. `battlenet` kept as a fetch-only
+    convenience.
+  - Woodpecker CI is unchanged — it still watches the Forgejo copy, which
+    receives every commit via `origin`'s second push URL. `.woodpecker.yml`,
+    the Forgejo container registry, and the dns-ha-agent CI docs were not
+    touched.
+  - Updated `README.md` and `AGENTS.md` §"Git remotes" for the new model:
+    direct pushes to `main` are fine (no more PR-only rule for GitHub); the
+    Forgejo push leg can fail independently after GitHub already landed; the
+    `git.battlenet.internal` resolver-tunnel workaround now applies to
+    re-pushing the Forgejo leg alone.
+- **Acceptance criteria touched**: none (infrastructure only).
+- **Next**:
+  - On the next push, confirm both remotes land at the same SHA
+    (`git ls-remote origin main` vs `git ls-remote battlenet main`).
+- **Notes / anomalies**:
+  - The force-push was the only destructive step and was operator-run;
+    the classifier blocks force-push from the agent.
+  - Dual-push means topic branches are also created on Forgejo; delete them
+    there too after a PR merge if they linger.
 
 ---
 

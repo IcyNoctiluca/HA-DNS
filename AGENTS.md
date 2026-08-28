@@ -19,38 +19,60 @@ Read this before making any changes to the HA DNS design or rollout. These are i
 | "I want to change AGH config" | `BLUEPRINT.md` §AdGuard Home Backend Pool (always change on dns-ams-01; let adguardhome-sync propagate) |
 | "I need to debug the agent" | `dns-ha-agent/AGENTS.md` |
 
-## Git remotes — Forgejo is the working remote
+## Git remotes — GitHub is canonical, Forgejo is a mirror
 
-This repo has two remotes, and they are **not** interchangeable:
+GitHub is the system of record. Forgejo holds a full copy so the homelab isn't
+responsible for hosting the canonical repo reliably.
 
-- **`battlenet`** (`ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git`) — the working remote. Push here directly, on `main`, as normal. This is what Woodpecker CI (`ci.battlenet.internal`) actually watches and builds from — see `dns-ha-agent/BLUEPRINT.md` §12. `main`'s upstream and `remote.pushDefault` are both configured to `battlenet`, so a bare `git push` / `git pull` with no remote named already does the right thing.
-- **`origin`** (`git@github.com:IcyNoctiluca/HA-DNS.git`) — a periodic mirror, not a working remote. **Never push commits to `origin/main` directly.** Update it only via a PR, and only when there's a real milestone worth publishing (not on every small fix) — see below.
+- **`origin`** — canonical. Fetches from GitHub (`git@github.com:IcyNoctiluca/HA-DNS.git`).
+  Has **two push URLs**: GitHub first, then Forgejo
+  (`ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git`). A single
+  `git push origin` writes to both. `main`'s upstream and `remote.pushDefault`
+  are both `origin`, so a bare `git push` / `git pull` does the right thing.
+- **`battlenet`** — a fetch-only convenience pointing at the Forgejo copy. Don't
+  push to it directly; that would bypass GitHub and let the two diverge. Woodpecker
+  CI (`ci.battlenet.internal`) still watches this Forgejo repo and builds from it —
+  see `dns-ha-agent/BLUEPRINT.md` §12 — and it receives every commit via `origin`'s
+  second push URL, so CI keeps triggering as normal.
 
-If `git push`/`git pull` fails to resolve `git.battlenet.internal` from a sandboxed environment (a known intermittent issue with some setups' local DNS resolver — `nslookup` may still succeed even when `ssh`/`git` don't), tunnel through a host that can reach it directly rather than fighting the resolver:
+Push directly to `main` as normal. There is no "PR only" rule for GitHub any more.
+
+### The Forgejo push leg can fail on its own
+
+`git push` writes to the push URLs in order: GitHub succeeds first, then Forgejo.
+If Forgejo is unreachable, git exits non-zero and reports the Forgejo error **even
+though the GitHub push already landed**. Don't re-run blindly assuming nothing
+happened — check `git ls-remote origin main` (GitHub) vs the branch you pushed.
+
+If the Forgejo leg fails because `git.battlenet.internal` won't resolve from a
+sandboxed environment (a known intermittent issue with some setups' local DNS
+resolver — `nslookup` may still succeed even when `ssh`/`git` don't), re-push the
+Forgejo copy alone through a host that can reach it directly:
 
 ```bash
-GIT_SSH_COMMAND='ssh -o ProxyCommand="ssh liampi@battlenet-1 -W %h:%p"' git push battlenet main
+GIT_SSH_COMMAND='ssh -o ProxyCommand="ssh liampi@battlenet-1 -W %h:%p"' \
+  git push ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git HEAD:main
 ```
 
-### Mirroring to GitHub
+### When the user wants a PR instead of a direct push
 
-Do this in an isolated worktree + branch, not on the shared working copy's `main` — other sessions may be actively committing there.
-
-When the user asks for changes to be merged (including a request to commit them in a new worktree, resolve conflicts, create a PR, and merge it), treat this as the standard PR workflow: use an isolated worktree and topic branch, commit the scoped changes, rebase on the target's current `main` and resolve genuine conflicts, push the branch, create the PR, squash-merge it, then clean up. This is explicit authorization for those PR actions. It does not replace the normal direct-push workflow for routine `battlenet/main` changes; use the PR workflow for the `origin` mirror or whenever the user specifically requests a PR merge.
+Use an isolated worktree + topic branch, not the shared working copy's `main`.
+When the user asks for changes to be merged (commit in a new worktree, resolve
+conflicts, create a PR, merge it), that is explicit authorization for the full
+flow: commit the scoped changes, rebase on the target's current `main`, resolve
+genuine conflicts, push the branch, create the PR, merge it, then clean up.
 
 ```bash
-git worktree add /path/to/some/worktree -b claude/<topic> battlenet/main
+git worktree add /path/to/some/worktree -b claude/<topic> origin/main
 cd /path/to/some/worktree
-git push origin claude/<topic>
+git push origin claude/<topic>   # topic branches also dual-push; harmless
 gh pr create --title "..." --body "..."
-gh pr merge --squash   # squash: battlenet/main's history is often granular
-                        # (one commit per fix found live); GitHub's main
-                        # should read as a clean, reviewable summary instead.
+gh pr merge --squash
 ```
 
-`origin/main` and `battlenet/main` can end up with independently-created commits carrying the *same content* but different hashes (this has actually happened — GitHub received a hand-pushed copy of some fixes while `battlenet` kept its own commit-per-fix trail). If `gh pr view --json mergeable` reports `CONFLICTING` for a reason that looks like this rather than a real content conflict, `git rebase origin/main` on the PR branch before force-pushing it — don't assume it's a genuine conflict to resolve by hand.
-
-Clean up afterward: `git worktree remove <path>`, delete the merged branch both locally and on `origin`.
+Clean up afterward: `git worktree remove <path>`, delete the merged branch both
+locally and on `origin`. Note the PR branch's dual-push also created it on Forgejo —
+delete it there too if it lingers.
 
 ## Invariants — never violate
 
