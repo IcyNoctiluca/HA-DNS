@@ -1,6 +1,7 @@
 package io.homelab.dnsha.tailscale;
 
 import io.homelab.dnsha.config.Config;
+import io.homelab.dnsha.contract.RoutePlan;
 import io.homelab.dnsha.decide.Decision;
 import io.homelab.dnsha.metrics.Metrics;
 import org.slf4j.Logger;
@@ -8,7 +9,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.LinkedHashSet;
 import java.util.Set;
 
 import static net.logstash.logback.argument.StructuredArguments.kv;
@@ -54,8 +54,7 @@ public final class Reconciler {
 
     public synchronized void reconcile(Decision decision) {
         Set<String> managed = Set.copyOf(config.tailscale().managedRoutes());
-        Set<String> preserved = Set.copyOf(config.tailscale().preservedRoutes());
-        Set<String> desired = decision == Decision.ADVERTISE ? union(managed, preserved) : preserved;
+        Set<String> desired = RoutePlan.desiredRoutes(config, decision);
 
         Set<String> actual;
         try {
@@ -142,9 +141,4 @@ public final class Reconciler {
         return lastObservedAdvertised;
     }
 
-    private static Set<String> union(Set<String> a, Set<String> b) {
-        Set<String> result = new LinkedHashSet<>(a);
-        result.addAll(b);
-        return Set.copyOf(result);
-    }
 }

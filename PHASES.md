@@ -1,6 +1,10 @@
-# HA DNS — Implementation Phases
+# HA DNS — Historical Battlenet rollout phases
 
-> Ordered rollout plan. Each phase has prerequisites, steps, and acceptance criteria. Do not advance to the next phase until the current phase's acceptance criteria are met. Status of each phase lives in [`PROGRESS.md`](PROGRESS.md), not here.
+> Preserved for design history. This is no longer an executable rollout plan;
+> the consuming infrastructure repository owns all commands, sequencing,
+> recovery and live acceptance evidence. Portable producer acceptance lives in
+> [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md). See
+> [`REPOSITORY_BOUNDARY.md`](REPOSITORY_BOUNDARY.md).
 
 ## Overview
 

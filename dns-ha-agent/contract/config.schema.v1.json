@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ha-dns.invalid/contracts/config.schema.v1.json",
+  "title": "dns-ha-agent configuration v1",
+  "type": "object",
+  "required": ["version", "node", "probe", "tailscale"],
+  "properties": {
+    "version": { "const": 1 },
+    "node": {
+      "type": "object",
+      "required": ["name", "region", "vip"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "region": { "type": "string" },
+        "vip": { "type": "string", "minLength": 1 }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "required": ["target", "resolve_names", "block_name"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "resolve_names": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "resolve_type": { "type": "string", "pattern": "^[Aa]$" },
+        "block_name": { "type": "string", "minLength": 1 },
+        "block_expectation": {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "must_not_return_real_ip" },
+            "allowed_rcodes": { "type": "array", "items": { "type": "string" } },
+            "allowed_ips": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "interval": { "$ref": "#/$defs/duration" },
+        "query_timeout": { "$ref": "#/$defs/duration" },
+        "fail_threshold": { "type": "integer" },
+        "success_threshold": { "type": "integer" }
+      }
+    },
+    "backend_probe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "$ref": "#/$defs/duration" },
+        "query_timeout": { "$ref": "#/$defs/duration" },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "address"],
+            "properties": {
+              "name": { "type": "string" },
+              "address": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "peers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "health_url"],
+        "properties": {
+          "name": { "type": "string" },
+          "health_url": { "type": "string", "format": "uri" }
+        }
+      }
+    },
+    "split_brain": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "peer_poll_interval": { "$ref": "#/$defs/duration" },
+        "peer_poll_timeout": { "$ref": "#/$defs/duration" },
+        "peer_unreachable_threshold": { "$ref": "#/$defs/duration" },
+        "min_peer_reports_to_self_withdraw": { "type": "integer" }
+      }
+    },
+    "tailscale": {
+      "type": "object",
+      "required": ["managed_routes"],
+      "properties": {
+        "mode": { "enum": ["cli", "noop"] },
+        "cli_path": { "type": "string" },
+        "socket_path": { "type": ["string", "null"] },
+        "managed_routes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "preserved_routes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "command_timeout": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "http": {
+      "type": "object",
+      "properties": {
+        "bind_address": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "format": { "enum": ["JSON", "PLAIN"] },
+        "level": { "type": "string" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "const": "/metrics" }
+      }
+    }
+  },
+  "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(ms|s|m|h)$"
+    }
+  }
+}

@@ -50,20 +50,18 @@ import java.util.stream.Collectors;
  *
  * SOCKET PATH (fixed 2026-07-22): every invocation now optionally prepends
  * `--socket=<path>` (see {@link #command(String...)}), sourced from
- * TailscaleConfig.socketPath / ansible's dns_ha_agent_tailscale_socket. Prior
+ * TailscaleConfig.socketPath / the consumer's declared socket path. Prior
  * to this, the class had no way to target a non-default socket path at all —
  * it relied entirely on the `tailscale` CLI's own hardcoded default
  * (`/var/run/tailscale/tailscaled.sock` on Linux) happening to match wherever
  * the compose template's bind-mount put the socket. That happened to be true
- * for every currently-committed example (defaults/main.yml and
- * host_vars/dns-ams-01.yml both use the default path), so this was never
- * exercised as a live bug, but the ansible role explicitly documents
+ * for every historical example, so this was never
+ * exercised as a live bug, but the consumer deployment contract documents
  * dns_ha_agent_tailscale_socket as a per-node override ("Must match the
  * tailscaled install on the edge node") — a node with a non-standard install
  * location would have had every `tailscale set`/`debug prefs` call fail with
  * no config-level way to fix it. See TailscaleConfig's javadoc for the
- * upstream-confirmed reason `TS_SOCKET` (the env var docker-compose.yml.j2
- * also sets) doesn't help here either.
+ * upstream-confirmed reason `TS_SOCKET` does not help here either.
  */
 public final class CliTailscaleClient implements TailscaleClient {
 

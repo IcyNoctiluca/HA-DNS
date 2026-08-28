@@ -349,7 +349,7 @@ class EndToEndIT {
 
         GenericContainer<?> container = new GenericContainer<>(
             new ImageFromDockerfile("dns-ha-agent-it/agent", false)
-                .withDockerfile(Path.of("Dockerfile")))
+                .withDockerfile(Path.of("Dockerfile").toAbsolutePath()))
             .withNetwork(network)
             .withEnv("DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE", "true")
             .withCopyFileToContainer(
