@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ha-dns.invalid/contracts/health.schema.v1.json",
+  "title": "dns-ha-agent /health response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "node", "region", "state", "vip_advertised",
+    "desired_vip_advertised", "fail_open", "force_withdraw_active",
+    "local_probe", "backends", "peers", "unreachable_peers", "uptime_seconds"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "node": { "type": "string" },
+    "region": { "type": "string" },
+    "state": { "enum": ["STARTING", "HEALTHY", "UNHEALTHY", "PARTITIONED", "SHUTTING_DOWN"] },
+    "vip_advertised": { "type": "boolean" },
+    "desired_vip_advertised": { "type": "boolean" },
+    "fail_open": { "type": "boolean" },
+    "force_withdraw_active": { "type": "boolean" },
+    "local_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "last_probe_ts", "last_result", "consecutive_successes",
+        "consecutive_failures", "resolve_check_ok", "filter_check_ok",
+        "last_probe_duration_ms"
+      ],
+      "properties": {
+        "last_probe_ts": { "type": ["string", "null"] },
+        "last_result": { "enum": ["HEALTHY", "UNHEALTHY"] },
+        "consecutive_successes": { "type": "integer" },
+        "consecutive_failures": { "type": "integer" },
+        "resolve_check_ok": { "type": "boolean" },
+        "filter_check_ok": { "type": "boolean" },
+        "last_probe_duration_ms": { "type": "integer" }
+      }
+    },
+    "backends": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "address", "last_probe_ts", "resolve_ok", "filter_ok"],
+        "properties": {
+          "name": { "type": "string" },
+          "address": { "type": "string" },
+          "last_probe_ts": { "type": ["string", "null"] },
+          "resolve_ok": { "type": "boolean" },
+          "filter_ok": { "type": "boolean" }
+        }
+      }
+    },
+    "peers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "last_seen_ts", "reachable", "reported_state", "reports_me_unreachable"],
+        "properties": {
+          "name": { "type": "string" },
+          "last_seen_ts": { "type": ["string", "null"] },
+          "reachable": { "type": "boolean" },
+          "reported_state": { "type": ["string", "null"] },
+          "reports_me_unreachable": { "type": "boolean" }
+        }
+      }
+    },
+    "unreachable_peers": { "type": "array", "items": { "type": "string" } },
+    "uptime_seconds": { "type": "integer", "minimum": 0 }
+  }
+}

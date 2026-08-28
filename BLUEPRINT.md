@@ -1,6 +1,10 @@
-# HA DNS — Design Blueprint
+# HA DNS — Portable design and historical topology
 
-> Source-of-truth design for the HA DNS layer. For implementation phases and rollout steps, see [`PHASES.md`](PHASES.md). For agent (dns-ha-agent) specifics, see [`dns-ha-agent/BLUEPRINT.md`](dns-ha-agent/BLUEPRINT.md).
+> The fail-closed behavior and agent contract are authoritative here. Concrete
+> hostnames, sites, addresses, supervisors, firewall commands and rollout steps
+> below are historical Battlenet design inputs and are being migrated to the
+> consumer repository; they are not executable desired state. See
+> [`REPOSITORY_BOUNDARY.md`](REPOSITORY_BOUNDARY.md).
 
 ## Context & Goals
 
@@ -374,7 +378,8 @@ Follow the same steps above, then additionally:
 1. Assign `tag:dns-edge` in Tailscale admin.
 2. Install dnsdist with the regional pool config for that region.
 3. Bind VIP to loopback (via systemd unit in Appendix B).
-4. Deploy `dns-ha-agent` via the ansible role. Update peer lists on the other edges in this region.
+4. In the consumer repository, pin a released `dns-ha-agent` image, validate
+   its rendered config and route plan offline, then update peer declarations.
 5. The agent advertises `10.253.53.53/32` automatically once it transitions to HEALTHY — route auto-approves via tag.
 6. Add this edge's local AGH as a backend to the other edge in the same region (and vice versa), so both edges share the full regional pool.
 
@@ -610,7 +615,10 @@ Health-driven route mutation is handled by `dns-ha-agent`, a containerised Java 
 **Deployment summary** (the operational hook for this document):
 
 1. The agent is built by Woodpecker CI (`ci.battlenet.internal`, wired to Forgejo via OAuth — Forgejo's own Actions are deliberately disabled on this instance) and published to the Forgejo container registry at `git.battlenet.internal/liamp/dns-ha-agent`. CI publishes `:latest` as a browse-only pointer; **deployments pin by image digest** (`@sha256:...`).
-2. An ansible role (`ansible/roles/dns-ha-agent`) renders a per-node config from `host_vars` and starts the container via docker-compose with `--network host`. The role asserts a digest is set; deploys without one are a hard error.
+2. The infrastructure consumer renders a per-node config, validates it with the
+   exact pinned image, verifies both route-plan states, and supplies a runtime
+   with host networking and LocalAPI socket access. Missing immutable artifact
+   provenance is a hard error.
 3. Per-node config sets the node's name, region, VIP, peer list (other edges' Tailscale IPs), and probe parameters. Single-node regions (currently SHZ-01) deploy with an empty peer list, which automatically disables partition detection.
 4. The agent exposes `/health` (JSON, peer-facing) and `/metrics` (Prometheus) on TCP 8091. The Tailscale ACL restricts inbound to `tag:dns-edge`.
 5. On startup, the agent reconciles actual Tailscale route state — explicitly withdrawing the VIP if a previous instance crashed without graceful shutdown — then waits for 3 consecutive successful local probes before re-advertising. On SIGTERM, it withdraws the route gracefully before exit.

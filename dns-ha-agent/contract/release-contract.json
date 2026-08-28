@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "config_schema": "config.schema.v1.json",
+  "config_schema_version": 1,
+  "health_schema": "health.schema.v1.json",
+  "health_schema_version": 1,
+  "metrics_contract": "metrics-contract.v1.txt",
+  "metrics_contract_version": 1,
+  "route_plan_schema": "route-plan.schema.v1.json",
+  "route_plan_schema_version": 1,
+  "offline_commands": {
+    "check_config": ["--config", "PATH", "--check-config"],
+    "plan_routes": ["--config", "PATH", "--plan-routes"]
+  }
+}

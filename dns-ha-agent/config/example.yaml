@@ -1,8 +1,8 @@
 # Example configuration for dns-ha-agent.
-# In production this file is rendered by the ansible role's config.yaml.j2
-# template (see ../ansible/roles/dns-ha-agent/, Phase 6). This copy is for
-# local development and as a reference baked into the container image at
-# /etc/dns-ha-agent/example.yaml.
+# This is a host-neutral development example and is baked into the image at
+# /etc/dns-ha-agent/example.yaml. Infrastructure consumers render their own
+# values against ../contract/config.schema.v1.json and validate them with the
+# exact pinned image before deployment.
 #
 # Full schema documented in ../BLUEPRINT.md §5.
 
@@ -11,15 +11,15 @@ version: 1
 
 # This node's identity. Used in logs, metrics, /health output.
 node:
-  name: dns-ams-01
-  region: eu
+  name: edge-example-01
+  region: example
   # The VIP this node manages. Must match across the regional cluster.
-  vip: 10.253.53.53/32
+  vip: 192.0.2.53/32
 
 # Local DNS probing.
 probe:
   # The DNS target the agent probes (the VIP, served by local dnsdist).
-  target: 10.253.53.53
+  target: 192.0.2.53
 
   # Names that MUST resolve to a real A record (resolve check).
   # The check passes if AT LEAST ONE name returns a valid answer.
@@ -31,7 +31,7 @@ probe:
   # A name that MUST be blocked by AGH (filter check).
   # See ../BLUEPRINT.md §5 for why this must be a real public A record
   # behind an AGH block rule, not a made-up internal label.
-  block_name: dns-filter-sentinel.example.com
+  block_name: blocked.example
 
   block_expectation:
     mode: must_not_return_real_ip
@@ -95,7 +95,7 @@ tailscale:
   # Routes this agent is ALLOWED to manage (advertise when HEALTHY,
   # withdraw otherwise).
   managed_routes:
-    - 10.253.53.53/32
+    - 192.0.2.53/32
 
   # Routes that may already be advertised by the host and must NOT be wiped
   # when the agent calls `tailscale set --advertise-routes=...`.

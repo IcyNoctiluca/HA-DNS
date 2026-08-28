@@ -5,6 +5,7 @@ import io.homelab.dnsha.config.Config;
 import io.homelab.dnsha.config.ConfigException;
 import io.homelab.dnsha.config.ConfigLoader;
 import io.homelab.dnsha.config.PeerConfig;
+import io.homelab.dnsha.contract.OfflineContract;
 import io.homelab.dnsha.decide.Decision;
 import io.homelab.dnsha.http.HealthServer;
 import io.homelab.dnsha.lifecycle.GracefulShutdown;
@@ -80,6 +81,12 @@ public final class App {
     private static void run(String[] args) throws FatalStartupException {
         CliArgs cliArgs = CliArgs.parse(args);
         Config config = ConfigLoader.loadFromFile(cliArgs.configPath());
+
+        if (cliArgs.mode() != CliMode.RUN) {
+            OfflineContract.write(config, cliArgs.mode());
+            return;
+        }
+
         LoggingBootstrap.apply(config.logging());
 
         log.info("dns_ha_agent_starting",
@@ -239,11 +246,18 @@ public final class App {
         }
     }
 
-    /** Minimal `--config PATH` / `--allow-noop-tailscale` parsing. */
-    record CliArgs(Path configPath, boolean allowNoopTailscale) {
+    public enum CliMode {
+        RUN,
+        CHECK_CONFIG,
+        PLAN_ROUTES
+    }
+
+    /** Minimal runtime and offline-contract argument parsing. */
+    record CliArgs(Path configPath, boolean allowNoopTailscale, CliMode mode) {
         static CliArgs parse(String[] args) {
             Path configPath = DEFAULT_CONFIG_PATH;
             boolean allowNoop = false;
+            CliMode mode = CliMode.RUN;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--config" -> {
@@ -253,10 +267,23 @@ public final class App {
                         configPath = Path.of(args[++i]);
                     }
                     case "--allow-noop-tailscale" -> allowNoop = true;
+                    case "--check-config" -> mode = selectOfflineMode(mode, CliMode.CHECK_CONFIG);
+                    case "--plan-routes" -> mode = selectOfflineMode(mode, CliMode.PLAN_ROUTES);
                     default -> throw new IllegalArgumentException("unknown argument: " + args[i]);
                 }
             }
-            return new CliArgs(configPath, allowNoop);
+            if (mode != CliMode.RUN && allowNoop) {
+                throw new IllegalArgumentException(
+                    "--allow-noop-tailscale is a runtime option and cannot be combined with offline commands");
+            }
+            return new CliArgs(configPath, allowNoop, mode);
+        }
+
+        private static CliMode selectOfflineMode(CliMode current, CliMode requested) {
+            if (current != CliMode.RUN) {
+                throw new IllegalArgumentException("choose exactly one of --check-config or --plan-routes");
+            }
+            return requested;
         }
     }
 }

@@ -39,16 +39,15 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.assertj:assertj-core:3.25.3")
     testImplementation("org.mockito:mockito-core:5.11.0")
-    testImplementation("org.testcontainers:testcontainers:1.19.7")
-    testImplementation("org.testcontainers:junit-jupiter:1.19.7")
+    testImplementation("org.testcontainers:testcontainers:1.21.4")
+    testImplementation("org.testcontainers:junit-jupiter:1.21.4")
     // Phase 3 EndToEndIT partition tests: simulates the asymmetric-inbound
     // network failure (peer can't reach this node's :8091, this node can
     // still reach the peer) via a real TCP proxy in front of one agent
     // container, rather than iptables/NET_ADMIN inside the production
     // runtime image (see EndToEndIT javadoc). Same 1.19.x line as the
-    // other testcontainers artifacts above -- API confirmed against
-    // https://javadoc.io/doc/org.testcontainers/toxiproxy/1.19.7 (ContainerProxy#setConnectionCut(boolean)).
-    testImplementation("org.testcontainers:toxiproxy:1.19.7")
+    // other Testcontainers artifacts above.
+    testImplementation("org.testcontainers:toxiproxy:1.21.4")
 }
 
 tasks.test {

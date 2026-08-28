@@ -4,10 +4,14 @@ import io.prometheus.client.Collector;
 import io.prometheus.client.CollectorRegistry;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -36,36 +40,33 @@ class MetricsTest {
     }
 
     @Test
-    void allBlueprintSection6MetricFamiliesAreRegistered() {
+    void allVersionedContractMetricFamiliesAreRegistered() throws IOException {
         Metrics metrics = new Metrics();
 
-        Set<String> names = collectorMetricNames(metrics.registry);
+        Set<String> registeredApplicationNames = collectorMetricFamilyNames(metrics.registry).stream()
+            .filter(name -> name.startsWith("dns_ha_agent_"))
+            .collect(Collectors.toSet());
+        Set<String> contractedNames = Files.readAllLines(
+                Path.of("contract", "metrics-contract.v1.txt"))
+            .stream()
+            .map(String::trim)
+            .filter(line -> !line.isEmpty() && !line.startsWith("#"))
+            .map(line -> line.replaceFirst("\\{.*$", ""))
+            .collect(Collectors.toSet());
 
-        assertThat(names).contains(
-            "dns_ha_agent_probe_total",
-            "dns_ha_agent_probe_duration_seconds",
-            "dns_ha_agent_vip_advertised",
-            "dns_ha_agent_state",
-            "dns_ha_agent_peer_reachable",
-            "dns_ha_agent_route_mutations_total",
-            "dns_ha_agent_last_route_mutation_ts",
-            "dns_ha_agent_backend_resolve_ok",
-            "dns_ha_agent_backend_filter_ok",
-            "dns_ha_agent_backend_probe_total",
-            "dns_ha_agent_fail_open",
-            "dns_ha_agent_fail_open_duration_seconds");
+        assertThat(registeredApplicationNames).isEqualTo(contractedNames);
     }
 
     @Test
     void jvmMetricsAreRegistered() {
         Metrics metrics = new Metrics();
 
-        Set<String> names = collectorMetricNames(metrics.registry);
+        Set<String> names = collectorMetricFamilyNames(metrics.registry);
 
         assertThat(names.stream().anyMatch(n -> n.startsWith("jvm_"))).isTrue();
     }
 
-    private static Set<String> collectorMetricNames(CollectorRegistry registry) {
+    private static Set<String> collectorMetricFamilyNames(CollectorRegistry registry) {
         // Reconstruct the real exposed name from family.type, not from
         // samples. Prometheus simpleclient's Counter strips a trailing
         // "_total" from the *family* name internally (OpenMetrics
@@ -73,22 +74,7 @@ class MetricsTest {
         // family identity) and only re-adds it on each emitted Sample — e.g.
         // dns_ha_agent_probe_total registers as family "dns_ha_agent_probe".
         //
-        // A first fix attempt (2026-07-21, see PROGRESS.md) unioned in
-        // sample.name alongside family.name, on the assumption a sample
-        // would always be there to carry the suffixed name. That's true for
-        // *unlabelled* counters only: SimpleCollector auto-creates a
-        // zero-value "no labels" child at construction time, so an unlabelled
-        // Counter has one sample immediately. But dns_ha_agent_probe_total,
-        // dns_ha_agent_route_mutations_total, and
-        // dns_ha_agent_backend_probe_total all declare labelNames(...), and
-        // labelled children are created lazily on first .labels(...) call —
-        // which nothing does at construction time. So those three still had
-        // zero samples, meaning neither family.name (stripped) nor any
-        // sample.name (none existed) carried the "_total" suffix, and the
-        // test still failed on exactly those three even after the first fix
-        // (confirmed by a second real ./gradlew check run, still 2026-07-21).
-        //
-        // Fixing this for real: reconstruct the exposed name from
+        // Reconstruct the exposed name from
         // family.type instead, which is known at registration time
         // regardless of whether any child/sample exists yet. This matches
         // what MetricsResource/text-format rendering does for real request
@@ -102,9 +88,6 @@ class MetricsTest {
                     ? family.name + "_total"
                     : family.name;
             names.add(exposedName);
-            for (var sample : family.samples) {
-                names.add(sample.name);
-            }
         }
         return names;
     }

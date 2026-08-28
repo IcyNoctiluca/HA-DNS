@@ -6,6 +6,12 @@
 
 ## Status
 
+**Repository boundary update 2026-08-28**: this log now records producer build,
+test and release evidence only. The production Ansible tree has moved out of
+this repository; all older host/deployment entries below are historical and
+must not be used as current desired or live state. The new contract changes are
+locally unit-tested but remain unpublished until Woodpecker succeeds.
+
 **Update 2026-08-23 — CI now exercises integration tests, not just units**: `.woodpecker.yml`'s `test` step now runs `./gradlew --no-daemon check integrationTest` and exports `DOCKER_HOST=tcp://docker:2375`, explicitly connecting Testcontainers to Woodpecker's existing privileged DinD service. Before this, the local `integrationTest` task existed but the CI gate invoked only `check`, so Phase 7's requirement that integration tests pass in CI was not actually enforced. The agent blueprint and Gradle comments now point at Woodpecker rather than the deleted `.forgejo/workflows/build.yml` path. The Forgejo webhook allow-list was subsequently fixed and proved by the unattended push-event pipeline #16 (see the 2026-08-26 entry below); the next ordinary push now exercises this expanded CI gate automatically.
 
 **Update 2026-08-26 — Forgejo→Woodpecker automatic trigger is no longer blocked**: inspected the Battlenet infrastructure source and its recorded live evidence. Commit `f9a1e54` added the narrow `FORGEJO__webhook__ALLOWED_HOST_LIST=external,*.battlenet.internal` setting, rolled it out, and proved it with a real HA-DNS push that created Woodpecker pipeline #16 as a `push` event. This supersedes the stale blocker wording below; do not attempt a second workaround in this repository. The remaining implementation prerequisites are the controlled public filter-sentinel domain and a canary edge host with dnsdist/VIP.
@@ -114,6 +120,26 @@ This session's fresh-eyes static review (continuing the prior session's suggeste
 ---
 
 ## Log
+
+### 2026-08-28 — Versioned offline deployment contract
+
+- **Phase**: producer contract and repository-boundary migration
+- **Done**: added config, health, metrics and route-plan contracts; added
+  side-effect-free `--check-config` and `--plan-routes`; shared the route-set
+  calculation with the live reconciler; removed producer Ansible; passed the
+  Java 21 unit suite and shadow-JAR build; exercised both commands against the
+  neutral example config; built the full image through the legacy Docker API
+  path and verified its labels, embedded contracts and offline commands with
+  networking disabled.
+- **Acceptance criteria touched**: portable release interface implemented.
+- **Next**: publish only after Woodpecker's integration and image smoke gates
+  pass, then let Battlenet pin the resulting revision and digest separately.
+- **Notes / anomalies**: Testcontainers 1.19.7 could not speak to the current
+  Docker daemon. The harness was updated to 1.21.4 and its Dockerfile paths
+  corrected. The Dockerfile now derives the base OS architecture when
+  `TARGETARCH` is unavailable. Local integration attempts then reached the test
+  task but its Gradle daemon repeatedly disappeared, so integration is not
+  claimed green from this workstation run.
 
 ### 2026-07-23 (08:58 UTC) — Local verification re-confirmed (135/135, no staleness) + fresh-eyes static review of App.java wiring, IT lifecycle tests, ansible/CI, and BLUEPRINT §6 schema re-derivation, no new bug (dns-ha-agent)
 

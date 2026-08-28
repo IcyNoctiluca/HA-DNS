@@ -12,7 +12,7 @@
 | 3 | Peer monitoring + split-brain | Cross-edge peer health probing; PARTITIONED detection |
 | 4 | Liveness + reconciliation | WatchdogThread + startup reconciliation hardening |
 | 5 | CI/CD + digest pinning | Woodpecker builds + multi-arch + digest written to the pipeline workspace |
-| 6 | Ansible role | Idempotent deploy role with digest assertion |
+| 6 | Versioned consumer contract | Schemas, offline validation, route plan and OCI labels |
 | 7 | v1.0 acceptance (gate to production) | Full v1.0 acceptance criteria passed |
 
 The phases are designed so each one can be merged to main and yield a working (if incomplete) agent. No phase requires changes to a previous phase's contracts.
@@ -185,56 +185,57 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 ---
 
-## Phase 6 — Ansible role
+## Phase 6 — Versioned consumer contract
 
-**Goal**: declarative deploy. Idempotent. Refuses to run without a pinned digest.
+**Goal**: let any infrastructure consumer validate configuration and complete
+route behavior using the exact pinned image without granting it network or
+Tailscale access.
 
 ### Scope
 
-- `ansible/roles/dns-ha-agent/` per `BLUEPRINT.md` §14.
-- `defaults/main.yml` with `dns_ha_agent_image_digest` empty by default.
-- `tasks/main.yml` includes the digest assertion as first step.
-- `templates/config.yaml.j2` renders the full config schema.
-- `templates/docker-compose.yml.j2` renders the image as `repo@digest`.
-- `handlers/main.yml` restarts the container on config or compose changes.
-- Example `host_vars/dns-ams-01.yml` committed to repo as documentation.
+- Versioned config, health and route-plan JSON schemas.
+- `--check-config` validates and exits without side effects.
+- `--plan-routes` emits complete ADVERTISE and WITHDRAW route sets.
+- Live reconciliation and offline planning share one pure calculation.
+- OCI labels identify source revision and contract versions.
+- Production deployment roles and inventory are absent from this repository.
 
 ### Acceptance criteria
 
-- [ ] Running the role with `dns_ha_agent_image_digest=""` fails with the assertion message.
-- [ ] Running with a valid digest deploys the container; `/health` returns 200 within 30s.
-- [ ] Re-running the role with the same digest is a no-op (idempotent).
-- [ ] Changing config (e.g., a peer's IP) and re-running triggers a restart of the container.
-- [ ] Changing the digest and re-running pulls the new image and restarts.
+- [x] Valid config returns machine-readable `valid: true`.
+- [x] Invalid config retains the existing EX_CONFIG failure path.
+- [x] Route plan deterministically includes managed + preserved routes in
+  ADVERTISE and only preserved routes in WITHDRAW.
+- [x] Unit tests prove the live reconciler uses the same planner.
+- [x] Contract schemas and version labels ship in the image.
+- [x] The producer-side Ansible role and concrete inventory are removed after
+  the Battlenet consumer role passes independent syntax validation.
 
 ---
 
 ## Phase 7 — v1.0 acceptance (gate to production)
 
-**Goal**: prove the agent is ready to manage real production DNS. This is the gate before [`../PHASES.md`](../PHASES.md) Phase 8 (production cutover) can be advanced.
+**Goal**: prove the released agent behavior. Environment-specific canary,
+failure injection and rollback acceptance belong to the consumer repository.
 
 ### Acceptance criteria (full v1.0 set)
 
 - [ ] All unit and integration tests pass in CI.
 - [ ] Smoke test in CI pulls (by digest) and runs the image successfully.
 - [ ] Multi-arch image (`amd64`, `arm64`) published to `git.battlenet.internal/liamp/dns-ha-agent`; digest captured as CI build output.
-- [ ] Ansible role asserts digest is set; refuses to deploy without one.
-- [ ] Ansible role deploys cleanly to `dns-ams-01` (first canary).
-- [ ] **Tailscale socket reachable from container**: after the container starts, `docker exec dns-ha-agent tailscale status` succeeds (proves the LocalAPI socket bind mount works). The compose file must explicitly mount `/var/run/tailscale/tailscaled.sock` — host networking alone does not expose it.
-- [ ] Agent transitions STARTING → HEALTHY within 10s of container start.
-- [ ] **Startup reconciliation**: if the VIP is already advertised when the agent starts (simulate by manually `tailscale set --advertise-routes=10.253.53.53/32` before starting the agent), the agent withdraws it at startup and re-advertises only after passing local probes.
+- [x] The pinned image can validate configuration and emit both route states
+  without network access or a Tailscale socket.
 - [ ] `/health` returns valid JSON matching the schema in `BLUEPRINT.md` §6 — including `desired_vip_advertised`, `fail_open`, and `force_withdraw_active` fields.
 - [ ] `/metrics` returns valid Prometheus format including `dns_ha_agent_fail_open` and `dns_ha_agent_fail_open_duration_seconds`.
 - [ ] **Fail-open metric correctness**: if the effective decision is WITHDRAW but a managed route remains advertised after a mutation failure, `/metrics` exposes `dns_ha_agent_fail_open 1` and `/health` exposes `fail_open: true`. The `_duration_seconds` gauge tracks elapsed time correctly and resets when the route is withdrawn.
 - [ ] **Force-withdraw override**: creating `/var/lib/dns-ha-agent/force-withdraw` causes withdrawal within one probe cycle and `/health` exposes `force_withdraw_active: true`; removing it resumes normal operation.
 - [ ] **`tailscale.mode` enforcement**: starting the agent with `tailscale.mode: noop` in production (without `DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true`) exits non-zero with a clear error. Starting with `mode: cli` but no reachable Tailscale CLI/socket also exits non-zero.
 - [ ] SIGTERM withdraws route within 5s and exits 0.
-- [ ] **Self-exit on hang**: forcibly hang the probe loop (e.g., inject `Thread.sleep(Long.MAX_VALUE)` in a test build). Within 30s, the `WatchdogThread` detects and the process exits non-zero. Docker `restart: unless-stopped` restarts the container.
+- [ ] **Self-exit on hang**: forcibly hang the probe loop in a test build and prove `WatchdogThread` exits non-zero within 30s.
 - [ ] **Idempotent route mutation**: calling `TailscaleClient.advertiseRoutes()` twice with the same input is a no-op the second time; calling with a different input produces the expected mutation.
 - [ ] **Preserved-routes handling**: a non-DNS route added externally to `preserved_routes` config is never wiped by the agent's withdraw operation.
-- [ ] Inducing a filter break (stop AGH on dns-ams-01) causes the agent to withdraw within `(fail_threshold × interval) + tailscale convergence` ≈ 4s + 15s.
-- [ ] **Per-backend filter probe**: configure a backup backend with a broken filter (e.g., temporarily remove the sentinel block rule on `agh-iom-01` only). Within one backend-probe interval, `dns_ha_agent_backend_filter_ok{backend="agh-iom-01"} == 0` and `/health` flags `filter_ok: false` for that backend, but the edge stays HEALTHY and continues advertising the VIP (the active backend is still good). Restoring the block rule restores the metric to 1 within one interval.
-- [ ] Recovery after re-starting AGH: agent re-advertises within `success_threshold × interval` ≈ 6s.
-- [ ] Two agents probing each other correctly detect partition when network-partitioned in a test.
-- [ ] **Digest rollback** demonstrated: deploy digest A, deploy digest B, change ansible var back to A, redeploy, confirm image hash matches A exactly.
-- [ ] Replaces the bash watchdog (which was historically referenced in `../`) on every edge node without regressions.
+- [ ] Testcontainers proves a filter break causes withdrawal and recovery causes re-advertisement at the configured thresholds.
+- [ ] Two agents detect the supported asymmetric-inbound partition condition in integration tests.
+- [ ] A consumer independently proves digest/source admission, LocalAPI socket
+  access, canary rollout, live route preservation, failure injection and
+  rollback. That evidence remains outside this producer repository.

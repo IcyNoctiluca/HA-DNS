@@ -1,6 +1,9 @@
-# dns-ha-agent — Service Blueprint
+# dns-ha-agent — Portable service blueprint
 
-> Source-of-truth design and spec for the agent. For phase-ordered implementation steps and per-phase acceptance criteria, see [`PHASES.md`](PHASES.md). For the wider HA DNS context, see [`../BLUEPRINT.md`](../BLUEPRINT.md).
+> Source-of-truth behavior and release contract for the agent. Concrete
+> deployment examples in later sections are historical and non-authoritative;
+> infrastructure consumers own their runtime adapters and live acceptance.
+> See [`../REPOSITORY_BOUNDARY.md`](../REPOSITORY_BOUNDARY.md).
 
 ## 1. Purpose
 
@@ -20,9 +23,9 @@ At the wider system level, an n8n workflow on the Mac Studio may consume this se
 ### Goals
 
 - **Self-contained**: each instance probes itself + peers, decides locally, mutates only its own Tailscale state. No external monitoring tool is required for HA to function.
-- **Identical deployment**: same container image runs on every edge; behaviour parameterised entirely by a YAML config rendered per-node by ansible.
-- **Declarative**: the only operator-facing surface is the YAML config and the ansible role.
-- **Reproducible**: image is built deterministically in CI; ansible role is idempotent; production pins by image digest.
+- **Identical artifact**: the same container image runs on every edge; behavior is parameterized entirely by versioned YAML configuration.
+- **Declarative**: the operator-facing surface is the YAML and observable contract, not a bundled deployment mechanism.
+- **Reproducible**: the image is built in CI, labeled with its source revision and consumed by immutable digest.
 - **Observable**: structured JSON logs to stdout, `/health` endpoint for peers, `/metrics` endpoint for Prometheus.
 - **Fail-safe within the local lifecycle**: graceful shutdown withdraws immediately; startup reconciliation withdraws stale advertisements before health validation; internal hangs self-exit so Docker restarts the agent. Abrupt `SIGKILL` or host-level Tailscale failures can still leave a stale route until restart or external fencing, which is why fail-open metrics are exported.
 
@@ -154,7 +157,9 @@ The agent transitions through these states based on probe results:
 
 ## 5. Configuration Schema
 
-YAML config rendered by ansible from a template per node. Mounted into the container at `/etc/dns-ha-agent/config.yaml`.
+YAML config supplied by the infrastructure consumer and mounted into the
+container at `/etc/dns-ha-agent/config.yaml`. Consumers validate the rendered
+file with the exact pinned image before granting runtime capabilities.
 
 ### Full schema (v1)
 
@@ -320,8 +325,8 @@ http:
   # ACLs do not protect LAN-side traffic, so 0.0.0.0 leaks the agent's view
   # of the world to anything on the LAN that can reach the host's port 8091.
   #
-  # Bind to the node's Tailscale IP instead. The Ansible role looks up
-  # `ansible_tailscale0.ipv4.address` and renders it here.
+  # Bind to the node's declared management address instead. The consumer
+  # discovers and renders the environment-specific value.
   # Also add a UFW deny rule on port 8091 for non-Tailscale sources as
   # defence-in-depth (see ../PHASES.md Phase 1, step 4c).
   bind_address: "{{ tailscale_ip }}"
@@ -688,12 +693,12 @@ UTC timestamps with second precision. Higher-frequency events (per-probe in DEBU
 
 ```
 dns-ha-agent/
-├── ansible/roles/dns-ha-agent/
-│   ├── defaults/main.yml
-│   ├── tasks/main.yml
-│   ├── templates/config.yaml.j2
-│   ├── templates/docker-compose.yml.j2
-│   └── handlers/main.yml
+├── contract/
+│   ├── config.schema.v1.json
+│   ├── health.schema.v1.json
+│   ├── metrics-contract.v1.txt
+│   ├── route-plan.schema.v1.json
+│   └── release-contract.json
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle/wrapper/...
@@ -936,7 +941,7 @@ COPY config/example.yaml /etc/dns-ha-agent/example.yaml
 #     test: ["CMD", "wget", "-qO-",
 #            "http://{{ ansible_tailscale0.ipv4.address }}:8091/health"]
 #
-# See §11 docker-compose snippet below and §14 ansible role.
+# Consumers define runtime health checks using their declared bind address.
 # Reminder: HEALTHCHECK is DIAGNOSTIC ONLY — visible in `docker ps`, scraped
 # by monitoring. It does NOT trigger restarts (Docker/Compose does not
 # auto-restart on unhealthy alone). Recovery from hangs comes from the
@@ -950,16 +955,18 @@ Two architectures need to be built: `amd64` (if any edge is x86) and `arm64` (Pi
 
 **Image size target**: ≤350MB with `eclipse-temurin:21-jre-jammy` base + tailscale CLI. Smaller via `jlink` is a future optimisation, not v1.
 
-### Runtime: docker-compose snippet
+### Historical consumer runtime example (non-authoritative)
+
+The image requires host-network reachability and the host LocalAPI socket. The
+consumer chooses and owns the supervisor. This Compose fragment is retained
+only to illustrate capabilities; it is not a production deployment template.
 
 ```yaml
 services:
   dns-ha-agent:
     # IMMUTABLE DIGEST PIN — never use :latest in production deploys.
-    # Digest is rendered into this file by the ansible role from
-    # dns_ha_agent_image_digest, which is bumped on each intentional deploy.
-    # Rollback = change the digest var back to a known-good value, redeploy.
-    image: git.battlenet.internal/liamp/dns-ha-agent@sha256:DIGEST_HERE
+    # Consumers pin a released artifact by immutable digest.
+    image: registry.example/dns-ha-agent@sha256:DIGEST_HERE
     container_name: dns-ha-agent
     restart: unless-stopped
     network_mode: host
@@ -1051,7 +1058,11 @@ Docker-in-Docker is required because Woodpecker step containers don't get host D
 
 ---
 
-## 14. Deployment (Ansible Role)
+## 14. Historical deployment sketch (non-authoritative)
+
+> The production Ansible role has moved to the Battlenet consumer repository.
+> The material below is preserved temporarily as migration history and must not
+> be copied or executed from this producer repository.
 
 ### Role structure
 
@@ -1254,7 +1265,10 @@ dns_ha_agent_peers:
 
 ---
 
-## 15. Operational Playbook
+## 15. Historical operational playbook (non-authoritative)
+
+> Runtime commands, canary order and recovery are consumer-owned. This section
+> remains only until its portable acceptance criteria have been extracted.
 
 ### First-time deployment to a new edge
 
@@ -1353,9 +1367,12 @@ docker compose -f /etc/dns-ha-agent/docker-compose.yml up -d
 
 ---
 
-## 17. External Route Fencing via n8n
+## 17. External fencing signal contract
 
-`dns-ha-agent` remains deliberately local-only: it mutates only its own host's Tailscale route advertisement. The wider HA DNS system adds a second remediation layer outside this service: an n8n workflow on the always-on Mac Studio can fence a bad edge by disabling that node's approved `10.253.53.53/32` route through the Tailscale API.
+`dns-ha-agent` remains deliberately local-only: it mutates only its own host's
+configured Tailscale routes. A consumer may add a separate controller that
+fences a bad edge centrally. The controller technology, host, API credentials
+and concrete route belong entirely to that consumer.
 
 This section documents the contract between the agent and that external controller. The agent does not call n8n and n8n does not change the agent's local state. n8n consumes the agent's telemetry plus external checks. Full operational detail (Tailscale API secrets, fencing decision guardrails, audit log, autoApprover interaction test) lives in [`../BLUEPRINT.md`](../BLUEPRINT.md) Appendix E.
 

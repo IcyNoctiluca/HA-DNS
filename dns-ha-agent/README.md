@@ -2,11 +2,15 @@
 
 A self-contained, containerised Java service that decides whether a DNS edge node should advertise the HA DNS VIP to Tailscale, based on local stack health and peer reachability.
 
-One instance runs on every edge node in the homelab's HA DNS topology. Same image everywhere; behaviour parameterised by a YAML config rendered per-node by ansible.
+One instance runs on each consumer-declared edge. The same image runs
+everywhere; behavior is parameterized by a versioned YAML configuration.
 
 ## Status
 
-**Implementation complete through the CI/CD phase.** Woodpecker builds and tests the agent on the local Battlenet Forgejo server, publishes multi-architecture images to the Forgejo registry, and smoke-tests the pushed image by digest. The Ansible role and final production acceptance gate still require a real edge-host canary.
+**Implementation and producer CI are complete.** The image exposes offline
+config validation and route planning, embeds versioned machine-readable
+contracts, and identifies its source revision. Production admission and canary
+evidence belong to the consuming infrastructure repository.
 
 The acceptance criteria for v1.0 are defined as the last phase in [`PHASES.md`](PHASES.md).
 
@@ -14,13 +18,15 @@ The acceptance criteria for v1.0 are defined as the last phase in [`PHASES.md`](
 
 This service is one component of the homelab HA DNS design. For the wider context — why the VIP exists, what fails closed means, how dnsdist / AGH / Unbound fit together — see [`../README.md`](../README.md).
 
-Concretely, the agent is the **sole authority** for mutating Tailscale route advertisements of the HA VIP (`10.253.53.53/32`). Without it, the route would either stay advertised by dead nodes (causing client-visible DNS outages) or require manual intervention on every failure.
+Concretely, the agent is the **sole authority** for mutating Tailscale route
+advertisements of the consumer-configured HA VIP. It never owns preserved
+routes supplied by the deployment environment.
 
 ## Document Map
 
 | Doc | Purpose |
 |---|---|
-| [`BLUEPRINT.md`](BLUEPRINT.md) | Design + spec: goals, state machine, config schema, API surface, implementation guidance, container & CI/CD strategy, ansible deployment, operational playbook. Read first if changing or implementing the service. |
+| [`BLUEPRINT.md`](BLUEPRINT.md) | Design + spec: goals, state machine, config schema, API surface, implementation guidance and container contract. Historical deployment sketches are non-authoritative migration debt. |
 | [`PHASES.md`](PHASES.md) | Implementation phases in dependency order, each with acceptance criteria. Read first if picking up unfinished implementation work. |
 | [`PROGRESS.md`](PROGRESS.md) | Append-only execution log. Read this to see what's been done. |
 | [`AGENTS.md`](AGENTS.md) | Coding conventions, invariants, and "do not touch" rules for agents (human or otherwise) working on this codebase. Read first before making any changes. |
@@ -44,9 +50,13 @@ docker run --rm --network host \
 
 # Run the Testcontainers integration suite (requires Docker)
 ./gradlew integrationTest
+
+# Validate a consumer-rendered config without network or Tailscale access
+java -jar build/libs/dns-ha-agent.jar --config config/example.yaml --check-config
+java -jar build/libs/dns-ha-agent.jar --config config/example.yaml --plan-routes
 ```
 
-## Repo layout (planned)
+## Repo layout
 
 ```
 dns-ha-agent/
@@ -58,7 +68,7 @@ dns-ha-agent/
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── Dockerfile
-├── ansible/roles/dns-ha-agent/
+├── contract/          ← versioned producer/consumer schemas
 ├── config/example.yaml
 └── src/{main,test}/java/io/homelab/dnsha/
 ```

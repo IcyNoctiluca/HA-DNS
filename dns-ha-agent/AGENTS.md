@@ -2,6 +2,11 @@
 
 Read this before making any changes to this codebase. These are the invariants and conventions specific to this service. Violating them is more likely to break production DNS than help.
 
+This directory is a service producer. Deployment roles, inventory, firewall
+rules, real addresses and live rollout evidence belong to the consuming
+infrastructure repository. The interface is the pinned image plus files in
+`contract/`, not a shared Ansible checkout.
+
 ## Critical context
 
 This service is **the sole authority for *local self-mutation* of this node's Tailscale route advertisement** (i.e., the only thing that runs `tailscale set --advertise-routes=...` on this host). External system-level fencing — the n8n workflow described in `../BLUEPRINT.md` Appendix E — may independently disable a node's *approved* route via the Tailscale API; that is a separate layer for fail-open remediation and does not violate this invariant. A bug in this service can:
@@ -32,7 +37,7 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 5. **Only the explicit local-stack health probe queries the VIP it manages.** That probe intentionally tests the local `dnsdist → AGH → Unbound` path. No bootstrap, configuration, peer-monitoring, or ordinary resolver lookup may depend on the VIP; use local Unbound on `127.0.0.1:5335` or an explicit resolver IP for those instead.
 6. **`HealthState` mutations use the atomic-ref-swap pattern.** Build an immutable snapshot, swap the reference, broadcast. Do not add `synchronized` to read paths — they must be lock-free.
 7. **Probes are virtual threads.** No platform-thread pools for I/O. Concurrency is one virtual thread per probe target.
-8. **Image tags published to production are pinned by digest** (`@sha256:...`), not by name (`:latest`). CI publishes `:latest` as a browse pointer; ansible deploys by digest. Asserted in the ansible role.
+8. **Images identify their source and contract versions.** CI publishes a mutable browse pointer, while consumers pin an immutable digest and independently verify its OCI labels.
 9. **Logs are JSON to stdout** with UTC timestamps, structured fields. No `System.out.println`. No `printStackTrace` in production code paths.
 10. **Config is read once, at startup, from `/etc/dns-ha-agent/config.yaml`.** No hot reload. No environment-variable overrides. Restart the container to apply changes.
 
@@ -41,7 +46,7 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 - **"Use Tailscale LocalAPI over the unix socket instead of subprocessing the CLI"** — Better in principle, but requires HTTP-over-unix-socket in Java which is non-trivial. v1 uses subprocess; revisit in v2 only if subprocess error handling becomes a real pain point.
 - **"Add config hot-reload via WatchService"** — Adds a class of subtle bugs (mid-flight state during reload, atomic swap of complex config). Restart is fine.
 - **"Skip startup reconciliation; if we're advertising, we're healthy"** — Wrong. A previous instance may have advertised based on a now-stale view; the new instance must re-validate from scratch.
-- **"Run the agent under k3s for consistency with other homelab services"** — DNS must not depend on k3s availability. The agent runs as plain Docker (compose) on the edge host.
+- **"Make the agent depend on a cluster control plane"** — DNS must start and serve without an API server, scheduler, datastore, overlay or cluster DNS. The consumer may choose any supervisor that preserves those capabilities and mounts the host LocalAPI socket.
 - **"Add a /metrics endpoint that also runs probes on demand"** — `/metrics` reads from `HealthState`, never triggers probes. Probes happen on the loop; metrics expose snapshots.
 - **"Auto-withdraw a peer's route if we think it's unhealthy"** — No. Peers observe each other and surface alerts. They never mutate each other's Tailscale state. (See `BLUEPRINT.md` §Cross-Node Probing.)
 
@@ -50,7 +55,7 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 - `./gradlew check` must pass before any push to main. CI runs the same.
 - Integration tests use Testcontainers to stand up a `FakeAgh` container; do not stub at the Java layer — exercise the real DNS path.
 - `TailscaleClient` is the one production interface that is mocked in tests. Do not write tests that subprocess real `tailscale` on developer machines.
-- New configuration fields require: (a) schema bump or default value, (b) updates to `BLUEPRINT.md` §Configuration Schema, (c) updates to the ansible role's `defaults/main.yml` and `config.yaml.j2` template.
+- New configuration fields require: (a) schema bump or compatible default, (b) updates to `contract/config.schema.v1.json`, the example and `BLUEPRINT.md`, and (c) producer tests. Consumer templates are updated separately after a release exists.
 
 ## Logging conventions
 
@@ -61,8 +66,8 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 ## Versioning and release discipline
 
 - Source `:latest` after CI is a pointer for browsing the registry — not a deploy target.
-- Production deploys pin `dns_ha_agent_image_digest: sha256:...` in ansible group_vars.
-- Bumping the digest is the deploy. Rolling back = reverting the digest var. See `BLUEPRINT.md` §Rolling out a new agent version.
+- Production consumers pin a `sha256:...` image digest and matching source revision in their own desired state.
+- Bumping or reverting that consumer-owned pin performs rollout or rollback; this repository never carries the live value.
 - Registry retention keeps the last 20 digests. Anything older requires a rebuild from source.
 
 ## When in doubt

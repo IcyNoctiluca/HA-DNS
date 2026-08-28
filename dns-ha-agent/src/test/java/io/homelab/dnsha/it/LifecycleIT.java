@@ -239,7 +239,7 @@ class LifecycleIT {
 
         GenericContainer<?> container = new GenericContainer<>(
             new ImageFromDockerfile("dns-ha-agent-it/agent-lifecycle", false)
-                .withDockerfile(Path.of("Dockerfile")))
+                .withDockerfile(Path.of("Dockerfile").toAbsolutePath()))
             .withNetwork(network)
             .withEnv("DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE", "true")
             .withCopyFileToContainer(
