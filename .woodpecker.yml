@@ -49,13 +49,13 @@ steps:
     commands:
       - apk add --no-cache wget
       - cd dns-ha-agent
-      - docker build -t dns-ha-agent:ci .
+      - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" -t dns-ha-agent:ci .
       - |
         cat > /tmp/ci-config.yaml <<'CFG'
         version: 1
-        node: { name: ci-smoke, region: ci, vip: 10.253.53.53/32 }
+        node: { name: ci-smoke, region: ci, vip: 192.0.2.53/32 }
         probe:
-          target: 10.253.53.53
+          target: 192.0.2.53
           resolve_names: [cloudflare.com]
           resolve_type: A
           block_name: dns-filter-sentinel.example
@@ -72,7 +72,7 @@ steps:
         tailscale:
           mode: noop
           cli_path: /usr/bin/tailscale
-          managed_routes: [10.253.53.53/32]
+          managed_routes: [192.0.2.53/32]
           preserved_routes: []
           command_timeout: 10s
         http: { bind_address: 127.0.0.1, port: 8091 }
@@ -80,6 +80,8 @@ steps:
         metrics: { enabled: true, path: /metrics }
         CFG
       - docker run -d --name ci-smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml dns-ha-agent:ci
+      - docker run --rm -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml:ro dns-ha-agent:ci --check-config | grep -q '"valid":true'
+      - docker run --rm -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml:ro dns-ha-agent:ci --plan-routes | grep -q '"withdraw_routes":\[\]'
       - sleep 5
       - docker logs ci-smoke
       - docker exec ci-smoke wget -qO- http://127.0.0.1:8091/health | tee /tmp/ci-health.json
@@ -116,9 +118,9 @@ steps:
       # `docker manifest`, below, stays entirely inside containers Woodpecker
       # itself created, so the same CA trust that made `docker login` work
       # applies throughout.
-      - docker build --platform linux/amd64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 dns-ha-agent
+      - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" --platform linux/amd64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 dns-ha-agent
       - docker push git.battlenet.internal/liamp/dns-ha-agent:latest-amd64
-      - docker build --platform linux/arm64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-arm64 dns-ha-agent
+      - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" --platform linux/arm64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-arm64 dns-ha-agent
       - docker push git.battlenet.internal/liamp/dns-ha-agent:latest-arm64
       # :latest published as a convenience pointer ONLY.
       # Ansible deploys pin by digest, not by :latest.
@@ -150,9 +152,9 @@ steps:
       - |
         cat > test-config.yaml <<'EOF'
         version: 1
-        node: { name: smoke, region: ci, vip: 10.253.53.53/32 }
+        node: { name: smoke, region: ci, vip: 192.0.2.53/32 }
         probe:
-          target: 10.253.53.53
+          target: 192.0.2.53
           resolve_names: [cloudflare.com]
           resolve_type: A
           block_name: dns-filter-sentinel.example
@@ -169,7 +171,7 @@ steps:
         tailscale:
           mode: noop
           cli_path: /usr/bin/tailscale
-          managed_routes: [10.253.53.53/32]
+          managed_routes: [192.0.2.53/32]
           preserved_routes: []
           command_timeout: 10s
         http: { bind_address: 127.0.0.1, port: 8091 }
@@ -191,7 +193,7 @@ steps:
       # already empty). `$DIGEST` (no braces) isn't Woodpecker's
       # substitution syntax, so the shell alone resolves it, at runtime, as
       # intended.
-      - DIGEST=$(cat digest.txt) && IMAGE="git.battlenet.internal/liamp/dns-ha-agent@$DIGEST" && docker pull "$IMAGE" && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
+      - DIGEST=$(cat digest.txt) && IMAGE="git.battlenet.internal/liamp/dns-ha-agent@$DIGEST" && docker pull "$IMAGE" && docker run --rm --network none -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml:ro" "$IMAGE" --check-config | grep -q '"valid":true' && docker run --rm --network none -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml:ro" "$IMAGE" --plan-routes | grep -q '"withdraw_routes":\[\]' && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
       - |
         status=1
         for i in $(seq 1 12); do

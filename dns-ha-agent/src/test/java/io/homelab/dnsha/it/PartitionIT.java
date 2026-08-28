@@ -208,7 +208,8 @@ class PartitionIT {
 
     private GenericContainer<?> newUnstartedAgentContainer(String alias) {
         return new GenericContainer<>(
-            new ImageFromDockerfile("dns-ha-agent-it/agent", false).withDockerfile(Path.of("Dockerfile")))
+            new ImageFromDockerfile("dns-ha-agent-it/agent", false)
+                .withDockerfile(Path.of("Dockerfile").toAbsolutePath()))
             .withNetwork(network)
             .withNetworkAliases(alias)
             .withEnv("DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE", "true")

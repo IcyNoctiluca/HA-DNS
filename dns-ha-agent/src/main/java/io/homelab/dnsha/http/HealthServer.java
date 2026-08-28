@@ -28,7 +28,7 @@ import java.util.concurrent.TimeoutException;
  * IMPORTANT: in production this MUST be the node's Tailscale IP, never
  * 0.0.0.0 or 127.0.0.1 (top-level AGENTS.md invariant #8; HttpConfig's
  * javadoc notes the agent cannot itself detect "is this production" from
- * the file alone, so the ansible role, Phase 6, is the actual enforcement
+ * the file alone, so the infrastructure consumer is the actual enforcement
  * point). Local dev/CI override to 127.0.0.1 is expected and fine.
  */
 public final class HealthServer {

@@ -1,0 +1,15 @@
+# dns-ha-agent application metric families, contract version 1
+# Standard JVM metric families are provided by simpleclient_hotspot and are
+# intentionally outside this application-level compatibility contract.
+dns_ha_agent_probe_total{result}
+dns_ha_agent_probe_duration_seconds
+dns_ha_agent_vip_advertised
+dns_ha_agent_state{state}
+dns_ha_agent_peer_reachable{peer}
+dns_ha_agent_route_mutations_total{action,result}
+dns_ha_agent_last_route_mutation_ts
+dns_ha_agent_backend_resolve_ok{backend}
+dns_ha_agent_backend_filter_ok{backend}
+dns_ha_agent_backend_probe_total{backend,result}
+dns_ha_agent_fail_open
+dns_ha_agent_fail_open_duration_seconds

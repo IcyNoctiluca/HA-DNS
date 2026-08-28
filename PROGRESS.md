@@ -6,6 +6,19 @@
 
 ## Status
 
+**Current producer status 2026-08-28 (supersedes the deployment-oriented
+status paragraphs below)**: the working tree implements versioned config,
+health, metrics and route-plan contracts plus side-effect-free
+`--check-config` and `--plan-routes` commands. The producer deployment tree is
+removed. These changes are not yet a published release; no consumer should pin
+them until the producer CI gate publishes an immutable digest. Current
+deployment facts, blockers and rollout evidence live only in Battlenet.
+
+**Repository boundary update 2026-08-28**: new entries in this repository now
+cover portable design, build, test and release evidence only. Battlenet is
+authoritative for deployment state. Earlier host-specific entries remain below
+as historical evidence and must not be read as current desired or live state.
+
 **Current phase**: Phase 1 in progress — the **backend half** (Unbound + AGH)
 is deployed in Amsterdam as of 2026-08-23; the edge half (dnsdist, VIP,
 `tag:dns-edge`, the agent) is not. Phase 0's controlled DNS record and the
@@ -45,6 +58,38 @@ run/deploy) and Phase 7 (full v1.0 production acceptance) begin.
   - (what comes next, in order)
 - **Notes / anomalies**:
   - (anything surprising, decisions made, deviations from BLUEPRINT)
+
+---
+
+### 2026-08-28 — Producer/consumer boundary made executable
+
+- **Phase**: repository-boundary migration
+- **Done**:
+  - Added versioned machine-readable config, health, metrics and route-plan
+    contracts and embedded their versions plus the source revision in the OCI
+    image.
+  - Added offline config validation and deterministic route planning; the live
+    reconciler consumes the same pure desired-route calculation.
+  - Removed the producer-owned Ansible deployment tree and neutralized the
+    example config. Battlenet now owns all concrete deployment values.
+  - Built the shadow JAR and passed the complete unit suite on Java 21. Both
+    offline commands emitted valid JSON for the neutral example.
+  - Built a local producer image through Docker's legacy API path, verified
+    all five contract labels/files, and exercised both offline commands with
+    networking disabled. The build now falls back to the base OS architecture
+    when BuildKit does not provide `TARGETARCH`.
+  - Updated Testcontainers to 1.21.4 for current Docker API compatibility and
+    made integration Dockerfile paths explicit. Local integration attempts
+    reached the test task but its Gradle daemon repeatedly disappeared; no
+    integration result is claimed and Woodpecker remains the release gate.
+- **Acceptance criteria touched**: producer contract implementation complete;
+  immutable release publication still open.
+- **Next**:
+  1. Commit and push HA-DNS, then require a green Woodpecker unit, integration,
+     multi-architecture build and digest smoke run.
+  2. Admit that revision and digest in Battlenet as a separate change.
+- **Notes / anomalies**: no production host, route, tag, listener or deployment
+  service was changed.
 
 ---
 

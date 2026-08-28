@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ha-dns.invalid/contracts/route-plan.schema.v1.json",
+  "title": "dns-ha-agent offline route plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "config_schema_version",
+    "node",
+    "managed_routes",
+    "preserved_routes",
+    "advertise_routes",
+    "withdraw_routes"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "config_schema_version": { "const": 1 },
+    "node": { "type": "string" },
+    "managed_routes": { "$ref": "#/$defs/routes" },
+    "preserved_routes": { "$ref": "#/$defs/routes" },
+    "advertise_routes": { "$ref": "#/$defs/routes" },
+    "withdraw_routes": { "$ref": "#/$defs/routes" }
+  },
+  "$defs": {
+    "routes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    }
+  }
+}
