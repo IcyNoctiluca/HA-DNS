@@ -1,6 +1,7 @@
 # Agent Conventions — HA DNS
 
-Read this before making any changes to the HA DNS design or rollout. These are invariants and conventions specific to this stack; violating them creates real outage or filtering-bypass risk.
+Read this before changing the HA DNS producer or its portable contract. These
+invariants and conventions protect against outage and filtering bypass.
 
 ## Repository ownership boundary
 
@@ -8,12 +9,11 @@ This is the producer repository. It owns fail-closed behavior,
 `dns-ha-agent` source/tests/image build, and the versioned config, health and
 route-plan contracts. Physical hosts, sites, the actual VIP, Tailscale policy,
 credentials, supervisor, firewall, resolver deployment and live evidence belong
-to the consuming infrastructure repository. See
-[`REPOSITORY_BOUNDARY.md`](REPOSITORY_BOUNDARY.md).
+to the consuming infrastructure repository. See the boundary in
+[`README.md`](README.md#producer-and-consumer-boundary).
 
-Historical Battlenet deployment detail has been removed from `BLUEPRINT.md` and
-`PHASES.md`; old progress entries remain immutable producer history. Do not add
-new deployment detail here.
+The retired root deployment blueprint, phases, and progress log remain in Git
+history. Do not recreate them or add new deployment detail here.
 
 ## Critical context
 
@@ -25,8 +25,8 @@ new deployment detail here.
 
 | Task | Read |
 |---|---|
-| "Why does the design look like this?" | `BLUEPRINT.md` §Context & Goals, §The Core Mechanism |
-| "What's the current state of a deployment?" | The consuming infrastructure repository; `PROGRESS.md` is producer history only |
+| "Why does the design look like this?" | `README.md` §System contract |
+| "What's the current state of a deployment?" | The consuming infrastructure repository |
 | "I need to add a new edge node" | The consuming infrastructure repository plus this repo's published contract |
 | "Something broke, how do I recover?" | The consuming infrastructure repository's runbook |
 | "I want to change AGH config" | The consuming infrastructure repository |
@@ -76,9 +76,9 @@ flow: commit the scoped changes, rebase on the target's current `main`, resolve
 genuine conflicts, push the branch, create the PR, merge it, then clean up.
 
 ```bash
-git worktree add /path/to/some/worktree -b claude/<topic> origin/main
+git worktree add /path/to/some/worktree -b codex/<topic> origin/main
 cd /path/to/some/worktree
-git push origin claude/<topic>   # topic branches also dual-push; harmless
+git push origin codex/<topic>   # topic branches also dual-push; harmless
 gh pr create --title "..." --body "..."
 gh pr merge --squash
 ```
