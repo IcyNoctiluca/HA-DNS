@@ -6,11 +6,21 @@
 
 ## Status
 
-**Repository boundary update 2026-08-28**: this log now records producer build,
-test and release evidence only. The production Ansible tree has moved out of
-this repository; all older host/deployment entries below are historical and
-must not be used as current desired or live state. The new contract changes are
-locally unit-tested but remain unpublished until Woodpecker succeeds.
+**Current producer status 2026-08-29:** source revision
+`6d19438bf99bbff38692b41bdc0a866e3c124951` passed Woodpecker pipeline 26,
+including unit/integration tests, multi-architecture publication, and the
+digest smoke-test. The immutable image digest is
+`sha256:61bdf3387050f2cacf1bd4f57ef91c527d5eaa5020a0eb26bb963f794dbf94f1`.
+This log records producer evidence only; older host/deployment entries are
+historical and must not be used as current desired or live state.
+
+**2026-08-29 — release and documentation housekeeping:** synchronized GitHub
+canonical `main` and the Forgejo mirror at the revision above; verified all
+pipeline 26 steps succeeded; removed environment-specific deployment examples
+from the active blueprint and phase documents while preserving this append-only
+history. No consumer deployment or live DNS state changed. Remaining producer
+Phase 7 gaps are explicit force-withdraw and production-mode enforcement tests;
+consumer admission evidence belongs in the consumer repository.
 
 **Update 2026-08-23 — CI now exercises integration tests, not just units**: `.woodpecker.yml`'s `test` step now runs `./gradlew --no-daemon check integrationTest` and exports `DOCKER_HOST=tcp://docker:2375`, explicitly connecting Testcontainers to Woodpecker's existing privileged DinD service. Before this, the local `integrationTest` task existed but the CI gate invoked only `check`, so Phase 7's requirement that integration tests pass in CI was not actually enforced. The agent blueprint and Gradle comments now point at Woodpecker rather than the deleted `.forgejo/workflows/build.yml` path. The Forgejo webhook allow-list was subsequently fixed and proved by the unattended push-event pipeline #16 (see the 2026-08-26 entry below); the next ordinary push now exercises this expanded CI gate automatically.
 
