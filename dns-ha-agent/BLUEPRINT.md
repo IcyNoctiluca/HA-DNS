@@ -2,7 +2,8 @@
 
 > Source-of-truth behavior and release contract for the agent. Infrastructure
 > consumers own their runtime adapters, concrete topology and live acceptance.
-> See [`../REPOSITORY_BOUNDARY.md`](../REPOSITORY_BOUNDARY.md).
+> See the producer/consumer boundary in the root
+> [`README.md`](../README.md#producer-and-consumer-boundary).
 
 ## 1. Purpose
 

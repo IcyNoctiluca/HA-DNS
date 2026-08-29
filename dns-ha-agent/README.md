@@ -18,7 +18,7 @@ The acceptance criteria for v1.0 are defined as the last phase in [`PHASES.md`](
 
 This service is one component of the wider portable HA DNS design. For the
 reason the shared route exists, what fail-closed means, and the consumer
-acceptance contract, see [`../BLUEPRINT.md`](../BLUEPRINT.md).
+acceptance contract, see the root [`README.md`](../README.md#system-contract).
 
 Concretely, the agent is the **sole authority** for mutating Tailscale route
 advertisements of the consumer-configured HA VIP. It never owns preserved
