@@ -85,6 +85,21 @@ tasks.shadowJar {
     archiveBaseName.set("dns-ha-agent")
     archiveClassifier.set("")
     archiveVersion.set("")
+    // dnsjava 3.6.0 ships as a multi-release JAR (Multi-Release: true) and
+    // carries JVM-wide name-resolution hooks: a legacy
+    // sun.net.spi.nameservice.NameServiceDescriptor at the base layer and a
+    // Java 18+ java.net.spi.InetAddressResolverProvider whose class lives only
+    // under META-INF/versions/21. This agent uses dnsjava purely as a DNS
+    // *client* library, so those hooks must not ship. Shadow does not propagate
+    // dnsjava's Multi-Release manifest attribute, which strands
+    // DnsjavaInetAddressResolverProvider under META-INF/versions/21 where the
+    // JVM cannot find it; the first InetAddress lookup (e.g. resolving a probe
+    // target hostname) then throws ServiceConfigurationError and aborts startup
+    // with exit 70. Excluding both hooks keeps dnsjava a plain client library.
+    exclude("META-INF/services/java.net.spi.InetAddressResolverProvider")
+    exclude("META-INF/services/sun.net.spi.nameservice.NameServiceDescriptor")
+    exclude("org/xbill/DNS/spi/**")
+    exclude("META-INF/versions/**/org/xbill/DNS/spi/**")
 }
 
 tasks.jar {
