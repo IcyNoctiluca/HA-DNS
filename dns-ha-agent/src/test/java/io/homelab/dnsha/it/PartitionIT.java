@@ -26,21 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * PHASES.md Phase 3 acceptance criteria: the two-agent "asymmetric inbound"
  * and "fully isolated" partition scenarios.
  *
- * NOT EXECUTED / NOT VERIFIED IN THIS SANDBOX — same caveat as EndToEndIT
- * and FakeAghContainer (see their javadocs): there is no Docker daemon in
- * the environment this was written in, so none of this has been run.
- * Unlike those classes (written purely from the Testcontainers API surface
- * remembered/guessed at the time), the Toxiproxy usage here
- * (ToxiproxyContainer#getProxy(GenericContainer, int) returning a
- * ContainerProxy with getContainerIpAddress()/getProxyPort()/
- * setConnectionCut(boolean)) was checked against the published javadoc for
- * org.testcontainers:toxiproxy:1.19.7 (this project's pinned testcontainers
- * line) before being used — see build.gradle.kts's comment on the
- * dependency. That reduces API-guessing risk but does not substitute for
- * an actual run against Docker. Treat every assertion here as unverified
- * until it has been.
- *
- * Also NOTE: unlike EndToEndIT's existing pattern of calling
+ * NOTE: unlike EndToEndIT's existing pattern of calling
  * {@code agent.waitingFor(...)} AFTER {@code agent.start()} (which does not
  * retroactively block — Testcontainers wait strategies only apply to the
  * container's own startup), this class waits by polling
@@ -66,6 +52,7 @@ class PartitionIT {
     private static final String FAKE_AGH_ALIAS = "fake-agh";
     private static final String AGENT_A_ALIAS = "agent-a";
     private static final String AGENT_B_ALIAS = "agent-b";
+    private static final String TOXIPROXY_ALIAS = "toxiproxy";
     private static final int HEALTH_PORT = 8091;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
@@ -85,7 +72,8 @@ class PartitionIT {
         fakeAgh.start();
 
         toxiproxy = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.5.0"))
-            .withNetwork(network);
+            .withNetwork(network)
+            .withNetworkAliases(TOXIPROXY_ALIAS);
         toxiproxy.start();
     }
 
@@ -186,21 +174,29 @@ class PartitionIT {
 
     /**
      * Builds both (unstarted) agent containers, registers a Toxiproxy
-     * proxy in front of each one's :8091 (registering a proxy is expected
-     * to only require the target container's configured network alias,
-     * not for it to be running yet -- see class javadoc on why this is
-     * flagged, not assumed silently), writes each agent's config.yaml with
-     * its peer entry pointing at the OTHER agent's proxy, then starts both.
+     * proxy in front of each one's :8091 using the agent's network alias as
+     * the upstream (so it can be registered before the agent starts),
+     * writes each agent's config.yaml with its peer entry pointing at the
+     * OTHER agent's proxy, then starts both.
      */
     private void startBothAgents() {
         agentA = newUnstartedAgentContainer(AGENT_A_ALIAS);
         agentB = newUnstartedAgentContainer(AGENT_B_ALIAS);
 
-        proxyToA = toxiproxy.getProxy(agentA, HEALTH_PORT);
-        proxyToB = toxiproxy.getProxy(agentB, HEALTH_PORT);
+        proxyToA = toxiproxy.getProxy(AGENT_A_ALIAS, HEALTH_PORT);
+        proxyToB = toxiproxy.getProxy(AGENT_B_ALIAS, HEALTH_PORT);
 
-        String aHealthUrlViaProxy = "http://" + proxyToA.getContainerIpAddress() + ":" + proxyToA.getProxyPort() + "/health";
-        String bHealthUrlViaProxy = "http://" + proxyToB.getContainerIpAddress() + ":" + proxyToB.getProxyPort() + "/health";
+        // The agent containers and toxiproxy share a user-defined Testcontainers
+        // network, so the agents reach the proxies via toxiproxy's network alias
+        // + the proxy's *internal* listen port (getOriginalProxyPort()), NOT via
+        // getContainerIpAddress()/getProxyPort() — those are the Docker-host
+        // gateway and host-mapped port, which are not routable from inside a
+        // user-defined network. getProxy(alias, port) also sets the toxiproxy
+        // upstream to "<alias>:port" (resolved lazily by toxiproxy via the
+        // network's embedded DNS), so it works even though the agents are
+        // started only after their proxies are registered here.
+        String aHealthUrlViaProxy = "http://" + TOXIPROXY_ALIAS + ":" + proxyToA.getOriginalProxyPort() + "/health";
+        String bHealthUrlViaProxy = "http://" + TOXIPROXY_ALIAS + ":" + proxyToB.getOriginalProxyPort() + "/health";
 
         attachConfigAndStart(agentA, AGENT_A_ALIAS, AGENT_B_ALIAS, bHealthUrlViaProxy);
         attachConfigAndStart(agentB, AGENT_B_ALIAS, AGENT_A_ALIAS, aHealthUrlViaProxy);
@@ -248,7 +244,7 @@ class PartitionIT {
               managed_routes: [10.253.53.53/32]
               preserved_routes: []
               command_timeout: 10s
-            http: { bind_address: 127.0.0.1, port: 8091 }
+            http: { bind_address: 0.0.0.0, port: 8091 }
             logging: { format: JSON, level: INFO }
             metrics: { enabled: true, path: /metrics }
             """.formatted(nodeName, FAKE_AGH_ALIAS, BLOCK_NAME, peerName, peerHealthUrl);
