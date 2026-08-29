@@ -1,48 +1,29 @@
 # HA DNS — Progress Log
 
-> Append-only execution log. Newest entries at the top. Each entry records what was done, what's next, and any decisions/anomalies worth surfacing. Phases are defined in [`PHASES.md`](PHASES.md).
+> Append-only execution log. Newest entries are added above older dated
+> entries. [`PHASES.md`](PHASES.md) defines the producer release sequence;
+> agent acceptance criteria live in
+> [`dns-ha-agent/PHASES.md`](dns-ha-agent/PHASES.md).
 >
 > Format: one entry per session of work, dated. Use UTC. Keep entries terse — this is the "what happened" record, not the "why" (which lives in BLUEPRINT.md).
 
 ## Status
 
-**Current producer status 2026-08-28 (supersedes the deployment-oriented
-status paragraphs below)**: the working tree implements versioned config,
-health, metrics and route-plan contracts plus side-effect-free
-`--check-config` and `--plan-routes` commands. The producer deployment tree is
-removed. These changes are not yet a published release; no consumer should pin
-them until the producer CI gate publishes an immutable digest. Current
-deployment facts, blockers and rollout evidence live only in Battlenet.
+**Current producer status 2026-08-29:** source revision
+`6d19438bf99bbff38692b41bdc0a866e3c124951` passed Woodpecker pipeline 26.
+The test, multi-architecture build-and-push, digest smoke-test, and Docker
+service steps all succeeded. The published immutable image digest is
+`sha256:61bdf3387050f2cacf1bd4f57ef91c527d5eaa5020a0eb26bb963f794dbf94f1`.
 
-**Repository boundary update 2026-08-28**: new entries in this repository now
-cover portable design, build, test and release evidence only. Battlenet is
-authoritative for deployment state. Earlier host-specific entries remain below
-as historical evidence and must not be read as current desired or live state.
+The repository now owns only the portable design, service implementation,
+versioned contracts, tests, and producer release evidence. Earlier
+host-specific log entries remain below as immutable history, not current
+desired or live state. Infrastructure consumers own topology, credentials,
+deployment adapters, rollout, and live acceptance evidence.
 
-**Current phase**: Phase 1 in progress — the **backend half** (Unbound + AGH)
-is deployed in Amsterdam as of 2026-08-23; the edge half (dnsdist, VIP,
-`tag:dns-edge`, the agent) is not. Phase 0's controlled DNS record and the
-primary AGH block rule now exist, but the replica has not yet received that
-rule because the credential-gated sync daemon is not deployed. `dns-ha-agent`
-Phase 5 proved live; its Phase 6/7 remain.
-
-**Update 2026-08-22**: Liam stood up real infra (Forgejo + Woodpecker at `git.battlenet.internal` / `ci.battlenet.internal`), and `dns-ha-agent`'s CI pipeline ran green end-to-end for the first time ever — Phase 5 (CI/CD + digest pinning) acceptance criteria are now all met, closing out a blocker that had stood since design. Two real bugs (Woodpecker's compile-time `${VAR}` substitution silently blanking the digest; per-step-container registry auth) were found and fixed live, not by further static review. See `dns-ha-agent/PROGRESS.md`'s 2026-08-22 entry for full detail and `dns-ha-agent/PHASES.md` for the closed-out checklist.
-
-**Update 2026-08-23**: Pushed Phase 6 (Ansible role) as far as it goes without a real target host: `ansible-lint` now passes clean at the `production` profile (7 real `fqcn` violations fixed), `--syntax-check` passes, and both Jinja templates were confirmed to render correctly against representative values. See `dns-ha-agent/PROGRESS.md`'s 2026-08-23 entry for what that did and didn't verify.
-
-**Update 2026-08-23 (later)**: the backend half of Phase 1 is **deployed and proved on real hardware** in Amsterdam — both Unbound and AGH live on `dns-ams-01` (`battlenet-4`) and a newly-added second AMS backend `agh-ams-02` (`battlenet-3`). This partly supersedes the blocker note below: the "real Pi 5 edge hardware" prerequisite **is** in place and is now carrying the backend plane. The public domain for the filter sentinel is still outstanding (an interim `example.com` sentinel is in use). See the 2026-08-23 log entry.
-
-**Update 2026-08-28**: Git remotes flipped — GitHub (`IcyNoctiluca/HA-DNS`) is now canonical; Forgejo is a mirror that every `git push` writes to in the same operation. Woodpecker still builds from the Forgejo copy. See the 2026-08-28 log entry and `AGENTS.md` §"Git remotes".
-
-**Blockers now**: The Studio needs the existing AGH admin plaintext admitted to
-an encrypted Ansible vault before `adguardhome-sync` can copy the primary's
-rule to `agh-ams-02`. Separately, the edge half needs a scoped, persistent
-host-firewall design that coexists with the Amsterdam nodes' k3s-managed
-nftables state before sensitive `:1053` and `:8091` listeners are introduced.
-Only after those gates can `dns-ha-agent` Phase 6 (an actual Ansible
-run/deploy) and Phase 7 (full v1.0 production acceptance) begin.
-
-**Prior update, 2026-07-21 20:44 UTC**: the "unconfirmed fresh run" blocker is now cleared — 126/126 unit tests confirmed green (0 failures, 0 errors) at commit `e12bafd`, verified this session by reading the JUnit XML reports directly (no sandboxed session has ever had Docker access to produce this run itself; the run happened just before this session started and was cross-checked for freshness against HEAD). Treat Phases 0-4 as build-and-unit-test-verified; the Testcontainers/Docker-dependent integration-test suites remain unrun in any sandbox. This session additionally found and fixed a real bug in the Ansible role (missing `ansible.cfg` meant the role couldn't be found via its own documented invocation) plus two `ansible-lint` nits; see `dns-ha-agent/PROGRESS.md` 2026-07-21 (20:44 UTC) entry for detail.
+Producer-side Phase 7 still needs explicit tests for the force-withdraw
+override and production `tailscale.mode` gate. Consumer admission and live
+failure rehearsal are intentionally outside this repository.
 
 ---
 
@@ -58,6 +39,32 @@ run/deploy) and Phase 7 (full v1.0 production acceptance) begin.
   - (what comes next, in order)
 - **Notes / anomalies**:
   - (anything surprising, decisions made, deviations from BLUEPRINT)
+
+---
+
+### 2026-08-29 — Immutable producer release and documentation boundary
+
+- **Phase**: producer release and repository housekeeping
+- **Done**:
+  - Reconciled GitHub canonical `main` and the Forgejo mirror at source
+    revision `6d19438bf99bbff38692b41bdc0a866e3c124951`.
+  - Verified Woodpecker pipeline 26 completed successfully across test,
+    multi-architecture build-and-push, digest smoke-test, and Docker service.
+  - Recorded the published digest
+    `sha256:61bdf3387050f2cacf1bd4f57ef91c527d5eaa5020a0eb26bb963f794dbf94f1`.
+  - Recast the active blueprint and release plan as portable producer
+    documents, removed historical deployment-adapter examples from the active
+    agent specification, and retained old deployment entries only as history.
+- **Acceptance criteria touched**: producer CI, multi-architecture publication,
+  digest smoke-test, contract validation, health/metrics, fail-open, lifecycle,
+  route preservation, filtering failure/recovery, and asymmetric partition
+  integration tests are green.
+- **Next**:
+  1. Add explicit producer tests for force-withdraw and production-mode gates.
+  2. Let each consumer independently pin this source revision and digest and
+     record its own admission, canary, failure-injection, and rollback evidence.
+- **Notes / anomalies**: no production host, route, DNS setting, credential, or
+  deployment pin changed during this housekeeping.
 
 ---
 

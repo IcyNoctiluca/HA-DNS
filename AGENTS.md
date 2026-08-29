@@ -11,15 +11,15 @@ credentials, supervisor, firewall, resolver deployment and live evidence belong
 to the consuming infrastructure repository. See
 [`REPOSITORY_BOUNDARY.md`](REPOSITORY_BOUNDARY.md).
 
-Historical Battlenet names and commands remain in `BLUEPRINT.md`, `PHASES.md`
-and old progress entries while they are migrated. They are not current desired
-state and must not be extended with new deployment detail.
+Historical Battlenet deployment detail has been removed from `BLUEPRINT.md` and
+`PHASES.md`; old progress entries remain immutable producer history. Do not add
+new deployment detail here.
 
 ## Critical context
 
 - This is **production DNS** for the homelab tailnet. iOS, in particular, loses DNS entirely when its first-listed resolver fails — this whole design exists because the v0 setup was unreliable for iOS clients.
 - The design is **fail-closed**. If filtering can't be applied, DNS breaks rather than silently resolving unfiltered. Do not introduce fallback paths that violate this.
-- The `dns-ha-agent` is the **sole authority for *local self-mutation*** of each edge's Tailscale route advertisement (i.e., the only thing that runs `tailscale set --advertise-routes=...` on that host). Do not write code or scripts that call `tailscale set --advertise-routes=...` outside the agent. The n8n external fencer (see `BLUEPRINT.md` Appendix E) operates at a different layer: it disables a node's *approved* route centrally via the Tailscale API for fail-open remediation, and is intentionally outside the agent process.
+- The `dns-ha-agent` is the **sole authority for *local self-mutation* of each edge's Tailscale route advertisement** (i.e., the only thing that runs `tailscale set --advertise-routes=...` on that host). Do not write code or scripts that call `tailscale set --advertise-routes=...` outside the agent. A consumer-owned external fencer may operate at a different layer by disabling a node's *approved* route centrally through the Tailscale API; that is intentionally outside the agent process.
 
 ## Where to read first
 
@@ -95,7 +95,7 @@ delete it there too if it lingers.
 4. **Filtering backends and management listeners bind only to declared addresses**, never an unrestricted wildcard in production. The consumer supplies addresses and ports.
 5. **A responsive but unfiltered backend is unhealthy.** Backend admission must test both resolution and the controlled filtering sentinel.
 6. **Filtering-policy ownership and replication are consumer deployment concerns.** This repository defines only the required equivalent behavior across backends.
-7. **The dnsdist webserver is disabled by default**. If you need it for debugging, follow the credentials-from-file pattern documented in `BLUEPRINT.md` §Appendix B — never re-enable with placeholder passwords.
+7. **Any DNS-proxy management surface is disabled by default.** If a consumer enables one for debugging, it must use credentials from a protected secret source and a non-routable or explicitly protected bind; placeholder credentials are forbidden.
 8. **Management surfaces require three capabilities:** a non-wildcard bind, host-firewall defence in depth, and tailnet source policy. The consumer chooses the firewall technology, ports, tags and allowed principals.
 
 ## Things that look like good ideas but break the design

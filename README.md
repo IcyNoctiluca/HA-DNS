@@ -6,8 +6,11 @@ silently bypassing filtering.
 
 ## Status
 
-`dns-ha-agent` is implemented and locally CI-tested. It now publishes an
-offline config-validation and route-plan contract for infrastructure consumers.
+`dns-ha-agent` is implemented and producer-CI tested. Source revision
+`6d19438bf99bbff38692b41bdc0a866e3c124951` produced immutable image digest
+`sha256:61bdf3387050f2cacf1bd4f57ef91c527d5eaa5020a0eb26bb963f794dbf94f1`
+in green Woodpecker pipeline 26. It publishes an offline config-validation and
+route-plan contract for infrastructure consumers.
 Deployment status is intentionally not tracked here; Battlenet is the current
 consumer and is authoritative for its live state.
 
@@ -19,8 +22,8 @@ mirrored to Forgejo at `git.battlenet.internal`, where Woodpecker at
 
 | Doc | Purpose |
 |---|---|
-| [`BLUEPRINT.md`](BLUEPRINT.md) | The design itself: goals, constraints, components, regional topology, failure matrix, config files. Read first if you need to understand or change the design. |
-| [`PHASES.md`](PHASES.md) | Ordered implementation phases with per-phase acceptance criteria. Read first if you're rolling this out or picking up unfinished work. |
+| [`BLUEPRINT.md`](BLUEPRINT.md) | Portable system behavior: goals, invariants, failure model and consumer acceptance contract. |
+| [`PHASES.md`](PHASES.md) | Producer release sequence and the retirement boundary for the former Battlenet rollout runbook. |
 | [`PROGRESS.md`](PROGRESS.md) | Append-only execution log. Read this to see what's been done. |
 | [`AGENTS.md`](AGENTS.md) | Conventions, invariants, and "do not touch" rules for agents (human or otherwise) working on this stack. Read first before making any changes. |
 | [`REPOSITORY_BOUNDARY.md`](REPOSITORY_BOUNDARY.md) | The versioned artifact/API boundary between this producer and infrastructure consumers. |

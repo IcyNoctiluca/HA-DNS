@@ -9,7 +9,7 @@ infrastructure repository. The interface is the pinned image plus files in
 
 ## Critical context
 
-This service is **the sole authority for *local self-mutation* of this node's Tailscale route advertisement** (i.e., the only thing that runs `tailscale set --advertise-routes=...` on this host). External system-level fencing — the n8n workflow described in `../BLUEPRINT.md` Appendix E — may independently disable a node's *approved* route via the Tailscale API; that is a separate layer for fail-open remediation and does not violate this invariant. A bug in this service can:
+This service is **the sole authority for *local self-mutation* of this node's Tailscale route advertisement** (i.e., the only thing that runs `tailscale set --advertise-routes=...` on this host). Consumer-owned system-level fencing may independently disable a node's *approved* route through the Tailscale API; that is a separate layer for fail-open remediation and does not violate this invariant. A bug in this service can:
 - Leave a sick node advertising the VIP (clients route to a broken edge).
 - Cause flapping advertisements (Tailscale failover thrashes; clients see intermittent DNS).
 - Silently degrade filtering (the agent reports HEALTHY but the filter check is broken).
@@ -26,7 +26,7 @@ Treat the route-mutation path with the care you would give a hand-rolled distrib
 | "What does /health return?" | `BLUEPRINT.md` §API Surface |
 | "I'm starting Phase N" | `PHASES.md` (find phase) |
 | "What's been done already?" | `PROGRESS.md` |
-| "How does this fit into the wider HA DNS?" | `../BLUEPRINT.md` Appendix C |
+| "How does this fit into the wider HA DNS?" | `../BLUEPRINT.md` |
 
 ## Coding invariants — never violate
 
