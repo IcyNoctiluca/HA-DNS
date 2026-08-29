@@ -90,7 +90,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 - Prometheus simpleclient instrumentation throughout existing code.
 - `HealthSnapshot` is an immutable record built from `HealthState.snapshot()`.
 - JSON schema matches `BLUEPRINT.md` §6 exactly, **including the `backends` array** populated by `BackendProbe`.
-- `BackendProbe` — same dual probe (resolve + filter sentinel) as `DnsProbe`, but targeted directly at each configured AGH backend (`agh-ams-01`, `agh-iom-01`, etc.) on the slower `backend_probe.interval` cadence (default 30s). One virtual thread per backend.
+- `BackendProbe` — same dual probe (resolve + filter sentinel) as `DnsProbe`, but targeted directly at each configured filtering backend on the slower `backend_probe.interval` cadence (default 30s). One virtual thread per backend.
 - Backend probe results are written into `HealthState` so they appear in `/health.backends[].resolve_ok / filter_ok` and as `dns_ha_agent_backend_resolve_ok{backend=…}` / `dns_ha_agent_backend_filter_ok{backend=…}` / `dns_ha_agent_backend_probe_total{backend=…,result=…}` in `/metrics`.
 - **Important non-effect**: BackendProbe failures DO NOT influence the FSM or the route-mutation decision. They only emit metrics. Only `DnsProbe` (the active-path probe via the VIP) drives state transitions. This keeps "a backup backend has broken filtering" as an alert, not a withdraw trigger.
 
@@ -98,7 +98,7 @@ The phases are designed so each one can be merged to main and yield a working (i
 
 Tests run against the node's Tailscale IP (the agent's configured `http.bind_address`), NOT `localhost` — the agent does not bind to the loopback in production. Local development can override `http.bind_address` to `127.0.0.1` if needed.
 
-- [ ] `curl http://<tailscale_ip>:8091/health` returns 200 + valid JSON matching schema (run from the edge itself or from another tailnet member with the `tag:dns-edge` or `tag:dns-fencer` tag).
+- [ ] `curl http://<tailscale_ip>:8091/health` returns 200 + valid JSON matching schema (run from the edge itself or from another identity allowed by the consumer's tailnet policy).
 - [ ] `curl http://<tailscale_ip>:8091/metrics` returns 200 + valid Prometheus format.
 - [ ] All metrics listed in `BLUEPRINT.md` §6 are present and update correctly.
 - [ ] Integration test: state transitions are reflected in subsequent `/health` responses within one probe interval.
@@ -113,7 +113,7 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 ## Phase 3 — Peer monitoring + asymmetric-inbound partition detection
 
-**Goal**: peer awareness and best-effort PARTITIONED self-withdrawal for the asymmetric-inbound case. PARTITIONED is NOT a full quorum/split-brain system — see `BLUEPRINT.md` §4. The load-bearing partition protection is Layer 0 (Tailscale node-level failover) plus Layer 2 (n8n external fencing).
+**Goal**: peer awareness and best-effort PARTITIONED self-withdrawal for the asymmetric-inbound case. PARTITIONED is NOT a full quorum/split-brain system — see `BLUEPRINT.md` §4. The load-bearing partition protection is Tailscale node-level failover plus consumer-owned external fencing.
 
 ### Scope
 
@@ -149,7 +149,7 @@ Tests run against the node's Tailscale IP (the agent's configured `http.bind_add
 
 ### Acceptance criteria
 
-- [ ] Integration test: pre-advertise VIP manually (`tailscale set --advertise-routes=10.253.53.53/32`), then start agent. Agent's first action is to withdraw; it then goes through STARTING → HEALTHY before re-advertising. Log line `found stale VIP advertisement at startup` is present.
+- [ ] Integration test: pre-advertise VIP manually (`tailscale set --advertise-routes=192.0.2.53/32`), then start agent. Agent's first action is to withdraw; it then goes through STARTING → HEALTHY before re-advertising. Log line `found stale VIP advertisement at startup` is present.
 - [ ] Integration test: inject `Thread.sleep(Long.MAX_VALUE)` into probe loop in a test build. Within 30s the `WatchdogThread` detects and the process exits non-zero. Restart policy then restarts.
 - [ ] Integration test: send SIGTERM. Agent withdraws within 5s and exits 0.
 - [ ] Integration test: SIGKILL the agent. Restart policy restarts it. New instance performs reconciliation (withdraws stale VIP) before re-validating.
@@ -208,8 +208,8 @@ Tailscale access.
   ADVERTISE and only preserved routes in WITHDRAW.
 - [x] Unit tests prove the live reconciler uses the same planner.
 - [x] Contract schemas and version labels ship in the image.
-- [x] The producer-side Ansible role and concrete inventory are removed after
-  the Battlenet consumer role passes independent syntax validation.
+- [x] The producer-side deployment adapter and concrete inventory are removed
+  after an independent consumer adapter passes syntax validation.
 
 ---
 
@@ -220,22 +220,22 @@ failure injection and rollback acceptance belong to the consumer repository.
 
 ### Acceptance criteria (full v1.0 set)
 
-- [ ] All unit and integration tests pass in CI.
-- [ ] Smoke test in CI pulls (by digest) and runs the image successfully.
-- [ ] Multi-arch image (`amd64`, `arm64`) published to `git.battlenet.internal/liamp/dns-ha-agent`; digest captured as CI build output.
+- [x] All unit and integration tests pass in CI.
+- [x] Smoke test in CI pulls (by digest) and runs the image successfully.
+- [x] Multi-arch image (`amd64`, `arm64`) published to `git.battlenet.internal/liamp/dns-ha-agent`; digest captured as CI build output.
 - [x] The pinned image can validate configuration and emit both route states
   without network access or a Tailscale socket.
-- [ ] `/health` returns valid JSON matching the schema in `BLUEPRINT.md` §6 — including `desired_vip_advertised`, `fail_open`, and `force_withdraw_active` fields.
-- [ ] `/metrics` returns valid Prometheus format including `dns_ha_agent_fail_open` and `dns_ha_agent_fail_open_duration_seconds`.
-- [ ] **Fail-open metric correctness**: if the effective decision is WITHDRAW but a managed route remains advertised after a mutation failure, `/metrics` exposes `dns_ha_agent_fail_open 1` and `/health` exposes `fail_open: true`. The `_duration_seconds` gauge tracks elapsed time correctly and resets when the route is withdrawn.
+- [x] `/health` returns valid JSON matching the schema in `BLUEPRINT.md` §6 — including `desired_vip_advertised`, `fail_open`, and `force_withdraw_active` fields.
+- [x] `/metrics` returns valid Prometheus format including `dns_ha_agent_fail_open` and `dns_ha_agent_fail_open_duration_seconds`.
+- [x] **Fail-open metric correctness**: if the effective decision is WITHDRAW but a managed route remains advertised after a mutation failure, `/metrics` exposes `dns_ha_agent_fail_open 1` and `/health` exposes `fail_open: true`. The `_duration_seconds` gauge tracks elapsed time correctly and resets when the route is withdrawn.
 - [ ] **Force-withdraw override**: creating `/var/lib/dns-ha-agent/force-withdraw` causes withdrawal within one probe cycle and `/health` exposes `force_withdraw_active: true`; removing it resumes normal operation.
 - [ ] **`tailscale.mode` enforcement**: starting the agent with `tailscale.mode: noop` in production (without `DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true`) exits non-zero with a clear error. Starting with `mode: cli` but no reachable Tailscale CLI/socket also exits non-zero.
-- [ ] SIGTERM withdraws route within 5s and exits 0.
-- [ ] **Self-exit on hang**: forcibly hang the probe loop in a test build and prove `WatchdogThread` exits non-zero within 30s.
-- [ ] **Idempotent route mutation**: calling `TailscaleClient.advertiseRoutes()` twice with the same input is a no-op the second time; calling with a different input produces the expected mutation.
-- [ ] **Preserved-routes handling**: a non-DNS route added externally to `preserved_routes` config is never wiped by the agent's withdraw operation.
-- [ ] Testcontainers proves a filter break causes withdrawal and recovery causes re-advertisement at the configured thresholds.
-- [ ] Two agents detect the supported asymmetric-inbound partition condition in integration tests.
+- [x] SIGTERM withdraws route within 5s and exits 0.
+- [x] **Self-exit on hang**: forcibly hang the probe loop in a test build and prove `WatchdogThread` exits non-zero within 30s.
+- [x] **Idempotent route mutation**: calling `TailscaleClient.advertiseRoutes()` twice with the same input is a no-op the second time; calling with a different input produces the expected mutation.
+- [x] **Preserved-routes handling**: a non-DNS route added externally to `preserved_routes` config is never wiped by the agent's withdraw operation.
+- [x] Testcontainers proves a filter break causes withdrawal and recovery causes re-advertisement at the configured thresholds.
+- [x] Two agents detect the supported asymmetric-inbound partition condition in integration tests.
 - [ ] A consumer independently proves digest/source admission, LocalAPI socket
   access, canary rollout, live route preservation, failure injection and
   rollback. That evidence remains outside this producer repository.

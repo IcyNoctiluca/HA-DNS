@@ -16,7 +16,9 @@ The acceptance criteria for v1.0 are defined as the last phase in [`PHASES.md`](
 
 ## Role in the larger system
 
-This service is one component of the homelab HA DNS design. For the wider context — why the VIP exists, what fails closed means, how dnsdist / AGH / Unbound fit together — see [`../README.md`](../README.md).
+This service is one component of the wider portable HA DNS design. For the
+reason the shared route exists, what fail-closed means, and the consumer
+acceptance contract, see [`../BLUEPRINT.md`](../BLUEPRINT.md).
 
 Concretely, the agent is the **sole authority** for mutating Tailscale route
 advertisements of the consumer-configured HA VIP. It never owns preserved
@@ -26,7 +28,7 @@ routes supplied by the deployment environment.
 
 | Doc | Purpose |
 |---|---|
-| [`BLUEPRINT.md`](BLUEPRINT.md) | Design + spec: goals, state machine, config schema, API surface, implementation guidance and container contract. Historical deployment sketches are non-authoritative migration debt. |
+| [`BLUEPRINT.md`](BLUEPRINT.md) | Design + spec: goals, state machine, config schema, API surface, implementation guidance and container contract. |
 | [`PHASES.md`](PHASES.md) | Implementation phases in dependency order, each with acceptance criteria. Read first if picking up unfinished implementation work. |
 | [`PROGRESS.md`](PROGRESS.md) | Append-only execution log. Read this to see what's been done. |
 | [`AGENTS.md`](AGENTS.md) | Coding conventions, invariants, and "do not touch" rules for agents (human or otherwise) working on this codebase. Read first before making any changes. |
