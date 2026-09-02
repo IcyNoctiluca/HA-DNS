@@ -14,6 +14,18 @@ digest smoke-test. The immutable image digest is
 This log records producer evidence only; older host/deployment entries are
 historical and must not be used as current desired or live state.
 
+**2026-09-02 — publish an immutable version tag alongside `:latest`:** the
+consumer admission audit (Battlenet progress 0079) found that a digest recorded
+from an earlier pipeline no longer resolved, because only mutable
+`:latest`/`:latest-{amd64,arm64}` tags existed and each build overwrote the
+previous manifest, so registry retention GC'd the unreferenced blob. `build-and-push`
+and `publish-zot` now additionally tag every build with the immutable
+`$CI_COMMIT_SHA` version tag (per-arch `:$SHA-{amd64,arm64}` plus a `:$SHA`
+manifest list) on both the Forgejo and Zot registries. `:latest` remains a
+browse-only pointer; consumers pin by digest or by the version tag. This
+removes the first blocker the consumer audit identified before Battlenet can
+pin a release. Updated `dns-ha-agent/BLUEPRINT.md` §12/§13.
+
 **2026-09-02 — close the last two Phase 7 producer test gaps:** added
 `LifecycleIT.forceWithdrawFileOverridesHealthyAndResumesWhenRemoved`, which
 touches `/var/lib/dns-ha-agent/force-withdraw` inside the running agent and
