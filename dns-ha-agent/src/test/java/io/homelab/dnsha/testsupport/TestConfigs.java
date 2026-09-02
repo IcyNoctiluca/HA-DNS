@@ -30,6 +30,7 @@ public final class TestConfigs {
         private int successThreshold = 3;
         private List<PeerConfig> peers = List.of();
         private SplitBrainConfig splitBrain = SplitBrainConfig.disabled();
+        private String mode = "cli";
         private List<String> managedRoutes = List.of("10.253.53.53/32");
         private List<String> preservedRoutes = List.of();
 
@@ -40,6 +41,11 @@ public final class TestConfigs {
 
         public Builder successThreshold(int v) {
             this.successThreshold = v;
+            return this;
+        }
+
+        public Builder mode(String v) {
+            this.mode = v;
             return this;
         }
 
@@ -76,7 +82,7 @@ public final class TestConfigs {
                 failThreshold,
                 successThreshold);
             TailscaleConfig tailscale = new TailscaleConfig(
-                "cli", "/usr/bin/tailscale", null, managedRoutes, preservedRoutes, Duration.ofSeconds(10));
+                mode, "/usr/bin/tailscale", null, managedRoutes, preservedRoutes, Duration.ofSeconds(10));
 
             return new Config(1, node, probe, null, peers, splitBrain, tailscale, null, null, null);
         }

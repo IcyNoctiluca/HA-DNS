@@ -14,6 +14,23 @@ digest smoke-test. The immutable image digest is
 This log records producer evidence only; older host/deployment entries are
 historical and must not be used as current desired or live state.
 
+**2026-09-02 — close the last two Phase 7 producer test gaps:** added
+`LifecycleIT.forceWithdrawFileOverridesHealthyAndResumesWhenRemoved`, which
+touches `/var/lib/dns-ha-agent/force-withdraw` inside the running agent and
+asserts `/health` flips to `force_withdraw_active: true` +
+`desired_vip_advertised: false` + `vip_advertised: false` within one probe cycle
+(the FSM stays HEALTHY — the override is a Decider-level WITHDRAW, not a state
+transition), then re-advertises after the file is removed. Added
+`AppTailscaleModeTest` for the `tailscale.mode` noop gate: noop without
+`DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE`/`--allow-noop-tailscale` throws
+`FatalStartupException` (exit 78), the flag opt-in returns `NoopTailscaleClient`,
+and `mode: cli` returns `CliTailscaleClient` without any opt-in. The cli-mode
+"no reachable CLI/socket exits non-zero" half was already covered by
+`StartupReconciliationTest.unobservableTailscaleStateAtStartupIsFatal`. To make
+the noop gate directly testable, `App.createTailscaleClient` moved from
+`private` to package-visible (no behaviour change) and `TestConfigs.Builder`
+gained a `mode(...)` builder. Both Phase 7 items now checked in `PHASES.md`.
+
 **2026-09-02 — publish to the Zot OCI registry:** added a `publish-zot` step to
 `.woodpecker.yml` (main only) that re-tags the per-arch images already built by
 `build-and-push` and pushes them, plus a `:latest` manifest list, to the

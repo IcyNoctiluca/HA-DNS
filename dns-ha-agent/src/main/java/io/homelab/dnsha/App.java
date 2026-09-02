@@ -215,7 +215,12 @@ public final class App {
         return monitors;
     }
 
-    private static TailscaleClient createTailscaleClient(Config config, boolean allowNoopFlag)
+    /**
+     * Package-visible (not private) so {@code AppTailscaleModeTest} can prove
+     * the noop-mode production-safety gate directly (PHASES.md Phase 7
+     * "tailscale.mode enforcement") without spawning a container.
+     */
+    static TailscaleClient createTailscaleClient(Config config, boolean allowNoopFlag)
         throws FatalStartupException {
         String mode = config.tailscale().mode();
         boolean allowNoopEnv = "true".equalsIgnoreCase(System.getenv("DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE"));

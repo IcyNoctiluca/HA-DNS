@@ -1,5 +1,7 @@
 package io.homelab.dnsha.it;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
@@ -67,6 +70,8 @@ class LifecycleIT {
     private static final String FAKE_AGH_ALIAS = "fake-agh";
     private static final Pattern ADVERTISE_SUCCESS_PATTERN =
         Pattern.compile("\"action\":\"advertise\".*\"result\":\"success\"");
+
+    private final ObjectMapper jsonMapper = new ObjectMapper();
 
     private Network network;
     private FakeAghContainer fakeAgh;
@@ -177,6 +182,82 @@ class LifecycleIT {
         assertThat(tookMs).isLessThan(Duration.ofSeconds(10).toMillis()); // 5s budget + container-teardown slack
         assertThat(agent.getLogs()).contains("sigterm_withdraw_confirmed");
         assertThat(agent.getLogs()).contains("sigterm_graceful_shutdown_complete_exiting");
+    }
+
+    /**
+     * PHASES.md Phase 7 AC: "creating /var/lib/dns-ha-agent/force-withdraw
+     * causes withdrawal within one probe cycle and /health exposes
+     * force_withdraw_active: true; removing it resumes normal operation."
+     *
+     * The override is a Decider-level WITHDRAW, not an FSM transition, so the
+     * local FSM stays HEALTHY throughout (probes keep passing) while the
+     * effective decision flips to WITHDRAW — asserted below. The container
+     * runs as root, so /var/lib/dns-ha-agent is writable via docker exec.
+     */
+    @Test
+    void forceWithdrawFileOverridesHealthyAndResumesWhenRemoved() throws Exception {
+        agent = startAgent(builder -> builder);
+        waitForLogMatches(agent, ADVERTISE_SUCCESS_PATTERN, Duration.ofSeconds(10));
+
+        execInContainer("mkdir", "-p", "/var/lib/dns-ha-agent");
+        execInContainer("touch", "/var/lib/dns-ha-agent/force-withdraw");
+
+        // /health reflects the override on the very next request (force_withdraw_active
+        // and desired_vip_advertised are computed per-request from Decider), but
+        // vip_advertised only flips once the Reconciler withdraws on the next
+        // probe cycle (interval 2s) — wait for all three.
+        JsonNode forced = waitForHealth(
+            h -> h.get("force_withdraw_active").asBoolean()
+                && !h.get("desired_vip_advertised").asBoolean()
+                && !h.get("vip_advertised").asBoolean(),
+            Duration.ofSeconds(10));
+        assertThat(forced.get("state").asText()).isEqualTo("HEALTHY");
+
+        execInContainer("rm", "-f", "/var/lib/dns-ha-agent/force-withdraw");
+
+        JsonNode recovered = waitForHealth(
+            h -> !h.get("force_withdraw_active").asBoolean()
+                && h.get("desired_vip_advertised").asBoolean()
+                && h.get("vip_advertised").asBoolean(),
+            Duration.ofSeconds(10));
+        assertThat(recovered.get("state").asText()).isEqualTo("HEALTHY");
+    }
+
+    /**
+     * Polls /health (via docker exec + wget) until {@code predicate} holds or
+     * {@code timeout} elapses. Used instead of log-line matching for the
+     * force-withdraw recovery assertion, where an advertise log line already
+     * appeared earlier in the container's cumulative log stream.
+     */
+    private JsonNode waitForHealth(Predicate<JsonNode> predicate, Duration timeout) throws Exception {
+        Instant deadline = Instant.now().plus(timeout);
+        JsonNode last = null;
+        while (Instant.now().isBefore(deadline)) {
+            last = jsonMapper.readTree(curlInContainer("/health"));
+            if (predicate.test(last)) {
+                return last;
+            }
+            Thread.sleep(300);
+        }
+        throw new AssertionError(
+            "timed out after " + timeout + " waiting for /health condition; last response:\n" + last);
+    }
+
+    private String curlInContainer(String path) throws Exception {
+        var result = agent.execInContainer("wget", "-qO-", "http://127.0.0.1:8091" + path);
+        if (result.getExitCode() != 0) {
+            throw new IllegalStateException(
+                "wget " + path + " failed (exit " + result.getExitCode() + "): " + result.getStderr());
+        }
+        return result.getStdout();
+    }
+
+    private void execInContainer(String... command) throws Exception {
+        var result = agent.execInContainer(command);
+        if (result.getExitCode() != 0) {
+            throw new IllegalStateException(
+                "exec " + String.join(" ", command) + " failed (exit " + result.getExitCode() + "): " + result.getStderr());
+        }
     }
 
     /**
