@@ -14,6 +14,18 @@ digest smoke-test. The immutable image digest is
 This log records producer evidence only; older host/deployment entries are
 historical and must not be used as current desired or live state.
 
+**2026-09-02 — publish to the Zot OCI registry:** added a `publish-zot` step to
+`.woodpecker.yml` (main only) that re-tags the per-arch images already built by
+`build-and-push` and pushes them, plus a `:latest` manifest list, to the
+homelab's dedicated Zot registry at `registry.battlenet.internal/liamp/dns-ha-agent`.
+Kept as a separate step so a Zot outage cannot fail the canonical Forgejo
+publish or its digest smoke-test. Two new Woodpecker repo secrets
+(`zot_registry_user`, `zot_registry_token`) hold the Zot break-glass `liamp`
+credentials; a scoped Zot API key remains the intended long-term CI credential.
+Updated `dns-ha-agent/BLUEPRINT.md` §12/§13 to describe the mirror. This gives
+the consumer a first-party Zot image to iterate on while the Forgejo registry
+stays canonical.
+
 **2026-08-29 — release and documentation housekeeping:** synchronized GitHub
 canonical `main` and the Forgejo mirror at the revision above; verified all
 pipeline 26 steps succeeded; removed environment-specific deployment examples

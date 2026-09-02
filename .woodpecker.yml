@@ -133,6 +133,31 @@ steps:
       - event: [push, manual]
         branch: main
 
+  # Mirrors the Forgejo-registry images into the dedicated Zot OCI registry
+  # (registry.battlenet.internal). Re-tags the per-arch images already built
+  # and pushed by build-and-push (same shared dind daemon), pushes them, and
+  # publishes the multi-arch manifest list. Kept as a separate step so a Zot
+  # outage cannot fail the canonical Forgejo publish + digest smoke-test.
+  publish-zot:
+    image: docker:24-cli
+    environment:
+      DOCKER_HOST: tcp://docker:2375
+      ZOT_REGISTRY_USER:
+        from_secret: zot_registry_user
+      ZOT_REGISTRY_TOKEN:
+        from_secret: zot_registry_token
+    commands:
+      - echo "$ZOT_REGISTRY_TOKEN" | docker login registry.battlenet.internal -u "$ZOT_REGISTRY_USER" --password-stdin
+      - docker tag git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 registry.battlenet.internal/liamp/dns-ha-agent:latest-amd64
+      - docker push registry.battlenet.internal/liamp/dns-ha-agent:latest-amd64
+      - docker tag git.battlenet.internal/liamp/dns-ha-agent:latest-arm64 registry.battlenet.internal/liamp/dns-ha-agent:latest-arm64
+      - docker push registry.battlenet.internal/liamp/dns-ha-agent:latest-arm64
+      - docker manifest create registry.battlenet.internal/liamp/dns-ha-agent:latest registry.battlenet.internal/liamp/dns-ha-agent:latest-amd64 registry.battlenet.internal/liamp/dns-ha-agent:latest-arm64
+      - docker manifest push registry.battlenet.internal/liamp/dns-ha-agent:latest
+    when:
+      - event: [push, manual]
+        branch: main
+
   smoke-test:
     image: docker:24-cli
     environment:
