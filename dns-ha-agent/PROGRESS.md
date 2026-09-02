@@ -18,13 +18,19 @@ historical and must not be used as current desired or live state.
 `.woodpecker.yml` (main only) that re-tags the per-arch images already built by
 `build-and-push` and pushes them, plus a `:latest` manifest list, to the
 homelab's dedicated Zot registry at `registry.battlenet.internal/liamp/dns-ha-agent`.
-Kept as a separate step so a Zot outage cannot fail the canonical Forgejo
-publish or its digest smoke-test. Two new Woodpecker repo secrets
+It runs last (after `smoke-test`) so a Zot outage cannot fail the canonical
+Forgejo publish or its digest smoke-test. Two new Woodpecker repo secrets
 (`zot_registry_user`, `zot_registry_token`) hold the Zot break-glass `liamp`
 credentials; a scoped Zot API key remains the intended long-term CI credential.
-Updated `dns-ha-agent/BLUEPRINT.md` §12/§13 to describe the mirror. This gives
-the consumer a first-party Zot image to iterate on while the Forgejo registry
-stays canonical.
+Updated `dns-ha-agent/BLUEPRINT.md` §12/§13 to describe the mirror.
+
+The first run exposed a consumer-side gap: Zot (like OCI-only registries
+generally) rejects the Docker schema-2 manifest a plain `docker build` produces
+with `415`/`manifest invalid`, so the per-arch pushes failed at the manifest PUT
+after the blobs landed. Fixed in the consumer repo by enabling
+`http.compat: ["docker2s2"]` on Zot (which also covers the Docker manifest list)
+and re-rolling the pod; see the Battlenet repo's `docs/k3s/zot.md`. No producer
+change was needed beyond the step ordering.
 
 **2026-08-29 — release and documentation housekeeping:** synchronized GitHub
 canonical `main` and the Forgejo mirror at the revision above; verified all
