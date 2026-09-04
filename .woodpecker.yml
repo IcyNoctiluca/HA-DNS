@@ -35,8 +35,14 @@ steps:
     commands:
       - cd dns-ha-agent
       - ./gradlew --no-daemon check integrationTest
+    # A topic-branch update also creates a pull-request pipeline.  Run this
+    # expensive DinD/Testcontainers suite in that PR pipeline only: running it
+    # in both pipelines causes two complete container builds to contend for
+    # the single runner and makes the required PR status flaky.  Main is
+    # protected and receives this status before merge; manual runs retain an
+    # operator-triggered diagnostic path.
     when:
-      - event: [push, pull_request, manual]
+      - event: [pull_request, manual]
 
   # PR-only: proves the image still builds and boots without needing
   # registry write access. Superseded by build-and-push + smoke-test on
@@ -47,7 +53,6 @@ steps:
     environment:
       DOCKER_HOST: tcp://docker:2375
     commands:
-      - apk add --no-cache wget
       - cd dns-ha-agent
       - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" -t dns-ha-agent:ci .
       - |
