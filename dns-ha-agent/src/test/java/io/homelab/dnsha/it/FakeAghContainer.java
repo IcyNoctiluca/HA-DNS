@@ -87,7 +87,16 @@ public final class FakeAghContainer extends GenericContainer<FakeAghContainer> {
             cmd.withExposedPorts(concat(cmd.getExposedPorts(), udpPort));
         });
 
-        waitingFor(Wait.forHttp("/").forPort(CONTROL_PORT).withStartupTimeout(Duration.ofSeconds(30)));
+        // The test JVM talks to a remote DinD daemon, so its Docker host-port
+        // forwarding can become reachable a little after the container itself
+        // has started. Waiting through that mapping makes every IT fail with a
+        // 30-second ContainerFetchException even though fake-agh is healthy.
+        // Its own startup log is the direct readiness signal. setFilterBypassed
+        // still exercises the mapped control port below where that access is
+        // actually required.
+        waitingFor(Wait.forLogMessage(
+            ".*fake_agh control_server listening on :8080/tcp.*\\n", 1)
+            .withStartupTimeout(Duration.ofSeconds(30)));
     }
 
     private static ExposedPort[] concat(ExposedPort[] existing, ExposedPort extra) {
