@@ -20,6 +20,15 @@ services:
   docker:
     image: docker:24-dind
     privileged: true
+    # Testcontainers and the production-image build pull public images through
+    # this nested daemon.  The CI runner must not depend on the HA DNS edge it
+    # is testing: a DNS-edge outage otherwise turns into misleading container
+    # startup timeouts and blocks the very change meant to repair it.  These
+    # scoped recursive resolvers are only for the disposable DinD service;
+    # the runner host and deployed HA-DNS nodes keep their declared resolvers.
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
     environment:
       DOCKER_TLS_CERTDIR: ""
 
