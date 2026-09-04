@@ -32,60 +32,45 @@ history. Do not recreate them or add new deployment detail here.
 | "I want to change AGH config" | The consuming infrastructure repository |
 | "I need to debug the agent" | `dns-ha-agent/AGENTS.md` |
 
-## Git remotes — GitHub is canonical, Forgejo is a mirror
+## Git remotes — Forgejo is canonical, GitHub is the verified mirror
 
-GitHub is the system of record. Forgejo holds a full copy so the homelab isn't
-responsible for hosting the canonical repo reliably.
+Forgejo is the system of record. Woodpecker observes this repository directly,
+and Forgejo mirrors every committed ref to GitHub with `sync_on_commit`; GitHub
+is a durable external copy, not a second writable source.
 
-- **`origin`** — canonical. Fetches from GitHub (`git@github.com:IcyNoctiluca/HA-DNS.git`).
-  Has **two push URLs**: GitHub first, then Forgejo
-  (`ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git`). A single
-  `git push origin` writes to both. `main`'s upstream and `remote.pushDefault`
-  are both `origin`, so a bare `git push` / `git pull` does the right thing.
-- **`battlenet`** — a fetch-only convenience pointing at the Forgejo copy. Don't
-  push to it directly; that would bypass GitHub and let the two diverge. Woodpecker
-  CI (`ci.battlenet.internal`) still watches this Forgejo repo and builds from it —
-  see `dns-ha-agent/BLUEPRINT.md` §12 — and it receives every commit via `origin`'s
-  second push URL, so CI keeps triggering as normal.
+- **`origin`** — canonical Forgejo:
+  `ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git`. It is both the
+  fetch and push remote; `main` tracks `origin/main`.
+- **`github`** — optional fetch-only reference to
+  `git@github.com:IcyNoctiluca/HA-DNS.git`. Never push to it. The Forgejo
+  repository's declared push mirror owns that write path and proves the two
+  `main` refs agree after every reconciliation.
 
-Push directly to `main` as normal. There is no "PR only" rule for GitHub any more.
-
-### The Forgejo push leg can fail on its own
-
-`git push` writes to the push URLs in order: GitHub succeeds first, then Forgejo.
-If Forgejo is unreachable, git exits non-zero and reports the Forgejo error **even
-though the GitHub push already landed**. Don't re-run blindly assuming nothing
-happened — check `git ls-remote origin main` (GitHub) vs the branch you pushed.
-
-If the Forgejo leg fails because `git.battlenet.internal` won't resolve from a
-sandboxed environment (a known intermittent issue with some setups' local DNS
-resolver — `nslookup` may still succeed even when `ssh`/`git` don't), re-push the
-Forgejo copy alone through a host that can reach it directly:
+For an existing checkout that still points at GitHub, make Forgejo `origin`
+before its next fetch or push:
 
 ```bash
-GIT_SSH_COMMAND='ssh -o ProxyCommand="ssh liampi@battlenet-1 -W %h:%p"' \
-  git push ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git HEAD:main
+git remote set-url origin ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git
+git config --unset-all remote.origin.pushurl
+git fetch origin
+git branch --set-upstream-to=origin/main main
 ```
 
-### When the user wants a PR instead of a direct push
-
-Use an isolated worktree + topic branch, not the shared working copy's `main`.
-When the user asks for changes to be merged (commit in a new worktree, resolve
-conflicts, create a PR, merge it), that is explicit authorization for the full
-flow: commit the scoped changes, rebase on the target's current `main`, resolve
-genuine conflicts, push the branch, create the PR, merge it, then clean up.
+Use an isolated worktree and a topic branch for every change. Push the topic
+branch to Forgejo and open the PR there; the declared rebase auto-merge policy
+merges it only after Woodpecker succeeds. Do not open a GitHub PR for this
+repository and do not repair a delayed GitHub mirror by pushing GitHub directly.
 
 ```bash
 git worktree add /path/to/some/worktree -b codex/<topic> origin/main
 cd /path/to/some/worktree
-git push origin codex/<topic>   # topic branches also dual-push; harmless
-gh pr create --title "..." --body "..."
-gh pr merge --squash
+git push origin codex/<topic>
 ```
 
-Clean up afterward: `git worktree remove <path>`, delete the merged branch both
-locally and on `origin`. Note the PR branch's dual-push also created it on Forgejo —
-delete it there too if it lingers.
+If GitHub replication is behind, stop changing the source repository and run
+Battlenet's `configure-forgejo-push-mirrors.yml`; it verifies the Forgejo
+generated deploy key, forces the initial sync when necessary, and refuses to
+claim success until both default-branch commits are identical.
 
 ## Invariants — never violate
 

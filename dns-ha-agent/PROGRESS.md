@@ -14,6 +14,17 @@ digest smoke-test. The immutable image digest is
 This log records producer evidence only; older host/deployment entries are
 historical and must not be used as current desired or live state.
 
+**2026-09-04 — Forgejo canonical, GitHub retained as a verified outbound
+mirror:** the source-of-truth transition is complete. `liamp/HA-DNS` on Forgejo
+now owns normal fetches, pushes and PRs; Forgejo's `sync_on_commit` SSH push
+mirror carries committed refs to `IcyNoctiluca/HA-DNS` on GitHub. The
+Forgejo-generated public key is the repository's writable GitHub deploy key;
+no GitHub personal token resides in Forgejo or Woodpecker. Battlenet's narrow
+`configure-forgejo-push-mirrors.yml` reconciliation proves the two `main` refs
+match and converges at zero changes. The rebase auto-merge policy is the next
+CI/CD gate; until it is deployed, contributors still use Forgejo topic-branch
+PRs and do not write GitHub directly.
+
 **2026-09-02 — publish an immutable version tag alongside `:latest`:** the
 consumer admission audit (Battlenet progress 0079) found that a digest recorded
 from an earlier pipeline no longer resolved, because only mutable

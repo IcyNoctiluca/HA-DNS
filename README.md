@@ -92,9 +92,10 @@ image digest
 in green Woodpecker pipeline 26. Deployment status is intentionally not tracked
 here; Battlenet is authoritative for its own live state.
 
-GitHub (`IcyNoctiluca/HA-DNS`) is canonical. Every push is mirrored to Forgejo
-at `git.battlenet.internal`, where Woodpecker at `ci.battlenet.internal` runs
-producer CI.
+Forgejo (`git.battlenet.internal/liamp/HA-DNS`) is canonical. Every Forgejo
+push is mirrored to GitHub (`IcyNoctiluca/HA-DNS`) by Forgejo itself, while
+Woodpecker at `ci.battlenet.internal` runs producer CI from the canonical
+Forgejo repository.
 
 ## Repository layout
 

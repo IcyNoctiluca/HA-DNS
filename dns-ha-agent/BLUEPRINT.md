@@ -964,9 +964,9 @@ Two architectures need to be built: `amd64` (if any edge is x86) and `arm64` (Pi
 
 ## 12. CI/CD (Woodpecker)
 
-**Engine**: Woodpecker at `ci.battlenet.internal`, OAuth-wired to the Forgejo
-mirror. The actual pipeline is producer-owned even though the CI service itself
-is deployed by the consumer infrastructure repository.
+**Engine**: Woodpecker at `ci.battlenet.internal`, OAuth-wired to the canonical
+Forgejo repository. The actual pipeline is producer-owned even though the CI
+service itself is deployed by the consumer infrastructure repository.
 
 The actual pipeline lives at [`../.woodpecker.yml`](../.woodpecker.yml) (repo root, not `dns-ha-agent/`, since that's where Woodpecker looks by default). Read that file for the literal, current definition — this section is a summary, not a second copy, so the two can't drift.
 
