@@ -93,16 +93,28 @@ steps:
         logging: { format: JSON, level: INFO }
         metrics: { enabled: true, path: /metrics }
         CFG
-      - docker run -d --name ci-smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml dns-ha-agent:ci
-      - docker run --rm -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml:ro dns-ha-agent:ci --check-config | grep -q '"valid":true'
-      - docker run --rm -v /tmp/ci-config.yaml:/etc/dns-ha-agent/config.yaml:ro dns-ha-agent:ci --plan-routes | grep -q '"withdraw_routes":\[\]'
+      # The Docker CLI runs in a separate container from the DinD service, so
+      # a CLI-side bind mount would point at a path the daemon cannot see.
+      # Copying through the Docker API makes the config available on the
+      # container actually launched by that daemon.
+      - docker create --name ci-config-check dns-ha-agent:ci --check-config
+      - docker cp /tmp/ci-config.yaml ci-config-check:/etc/dns-ha-agent/config.yaml
+      - docker start -a ci-config-check | grep -q '"valid":true'
+      - docker rm ci-config-check
+      - docker create --name ci-route-plan dns-ha-agent:ci --plan-routes
+      - docker cp /tmp/ci-config.yaml ci-route-plan:/etc/dns-ha-agent/config.yaml
+      - docker start -a ci-route-plan | grep -q '"withdraw_routes":\[\]'
+      - docker rm ci-route-plan
+      - docker create --name ci-smoke -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true dns-ha-agent:ci
+      - docker cp /tmp/ci-config.yaml ci-smoke:/etc/dns-ha-agent/config.yaml
+      - docker start ci-smoke
       - sleep 5
       - docker logs ci-smoke
       - docker exec ci-smoke wget -qO- http://127.0.0.1:8091/health | tee /tmp/ci-health.json
       - grep -q '"version"' /tmp/ci-health.json
       - docker exec ci-smoke wget -qO- http://127.0.0.1:8091/metrics | tee /tmp/ci-metrics.txt
       - grep -q '^dns_ha_agent_probe_total' /tmp/ci-metrics.txt
-      - docker stop ci-smoke
+      - docker rm -f ci-smoke
     when:
       - event: pull_request
 
