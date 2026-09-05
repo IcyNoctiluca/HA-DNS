@@ -26,6 +26,14 @@ services:
     # startup timeouts and blocks the very change meant to repair it.  These
     # scoped recursive resolvers are only for the disposable DinD service;
     # the runner host and deployed HA-DNS nodes keep their declared resolvers.
+    #
+    # NOT IN EFFECT as of 2026-09-05. Woodpecker's linter rejects this key --
+    # "Additional property dns is not allowed", field services.docker, raised
+    # as a warning on every run -- so it is dropped and the DinD service falls
+    # back to the runner host's resolver. The independence the paragraph above
+    # describes is therefore not actually being bought: a DNS-edge outage still
+    # reaches CI. Left in place so the intent survives; it needs whatever
+    # syntax this Woodpecker version accepts to apply for real.
     dns:
       - 1.1.1.1
       - 1.0.0.1
