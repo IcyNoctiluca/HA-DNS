@@ -20,23 +20,36 @@ services:
   docker:
     image: docker:24-dind
     privileged: true
-    # Testcontainers and the production-image build pull public images through
-    # this nested daemon.  The CI runner must not depend on the HA DNS edge it
-    # is testing: a DNS-edge outage otherwise turns into misleading container
-    # startup timeouts and blocks the very change meant to repair it.  These
-    # scoped recursive resolvers are only for the disposable DinD service;
-    # the runner host and deployed HA-DNS nodes keep their declared resolvers.
+    # NO `dns:` OVERRIDE HERE, DELIBERATELY, AND IT MUST NOT COME BACK
+    # WITHOUT SOLVING THE PROBLEM BELOW.
     #
-    # NOT IN EFFECT as of 2026-09-05. Woodpecker's linter rejects this key --
-    # "Additional property dns is not allowed", field services.docker, raised
-    # as a warning on every run -- so it is dropped and the DinD service falls
-    # back to the runner host's resolver. The independence the paragraph above
-    # describes is therefore not actually being bought: a DNS-edge outage still
-    # reaches CI. Left in place so the intent survives; it needs whatever
-    # syntax this Woodpecker version accepts to apply for real.
-    dns:
-      - 1.1.1.1
-      - 1.0.0.1
+    # `ci: give DinD a bootstrap resolver` (e0486062, 2026-09-04) set
+    # `dns: [1.1.1.1, 1.0.0.1]` on this service, so that CI would not depend on
+    # the HA DNS edge it is testing. The intent is sound and the effect was
+    # fatal: every main push since has failed. Public names resolved fine --
+    # Alpine's CDN, Docker Hub, binfmt all pulled -- and then `docker login
+    # git.battlenet.internal` died with
+    #
+    #     lookup git.battlenet.internal on 127.0.0.11:53: no such host
+    #
+    # because a public recursive resolver has never heard of the internal zone,
+    # and this pipeline pushes every image it builds to a registry inside it.
+    # A note added earlier the same day claiming the key was "not in effect"
+    # was wrong: Woodpecker's linter does warn "Additional property dns is not
+    # allowed", but it applies the key anyway. The warning is noise; the
+    # override was real.
+    #
+    # With no override the daemon inherits the runner host's effective
+    # resolvers, which answer BOTH the public internet and the internal zone --
+    # verified on the runner: a plain container there resolves
+    # git.battlenet.internal. That is also what worked for the months before
+    # e0486062.
+    #
+    # If the independence is wanted back, it needs a resolver that can answer
+    # the internal zone too. Note that hardcoding Battlenet's LAN resolver
+    # addresses here would cross the repository boundary this project keeps
+    # (Battlenet owns host and site facts, HA-DNS owns the agent), so the fix
+    # belongs on the runner, not in this file.
     environment:
       DOCKER_TLS_CERTDIR: ""
 
