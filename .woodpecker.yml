@@ -70,6 +70,15 @@ steps:
     environment:
       DOCKER_HOST: tcp://docker:2375
     commands:
+      # Woodpecker starts services and steps together; it does not wait for the
+      # DinD daemon to be listening. Every docker-using step therefore waits
+      # for it first. Without this the step races the daemon and fails with
+      # "Cannot connect to the Docker daemon at tcp://docker:2375" -- which is
+      # what main pushes did on 2026-09-05, immediately, three runs in a row.
+      # The race is old; what changed is that Battlenet dropped the Zot sync
+      # retries (its progress 0110) and step-image pulls went from ~15 minutes
+      # to ~20 seconds, so steps now reach `docker` before the daemon is up.
+      - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
       - cd dns-ha-agent
       - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" -t dns-ha-agent:ci .
       - |
@@ -136,6 +145,7 @@ steps:
       REGISTRY_TOKEN:
         from_secret: forgejo_registry_token
     commands:
+      - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
       - apk add --no-cache jq
       # linux/arm64 target (Pi 5 edges) needs QEMU emulation when building
       # on an x86 runner (H1).
@@ -185,6 +195,7 @@ steps:
       REGISTRY_TOKEN:
         from_secret: forgejo_registry_token
     commands:
+      - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
       - apk add --no-cache wget jq
       # `docker login` writes credentials into this container's own
       # ~/.docker/config.json, not into the shared dind daemon -- found
@@ -273,6 +284,7 @@ steps:
       ZOT_REGISTRY_TOKEN:
         from_secret: zot_ci_password
     commands:
+      - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
       - echo "$ZOT_REGISTRY_TOKEN" | docker login registry.battlenet.internal -u "$ZOT_REGISTRY_USER" --password-stdin
       # Same mutable :latest + immutable $CI_COMMIT_SHA tag scheme as the
       # Forgejo push; the version tag is the durable Zot reference too.
