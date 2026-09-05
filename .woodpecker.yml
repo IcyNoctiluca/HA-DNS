@@ -261,9 +261,9 @@ steps:
     environment:
       DOCKER_HOST: tcp://docker:2375
       ZOT_REGISTRY_USER:
-        from_secret: zot_registry_user
+        from_secret: zot_ci_username
       ZOT_REGISTRY_TOKEN:
-        from_secret: zot_registry_token
+        from_secret: zot_ci_password
     commands:
       - echo "$ZOT_REGISTRY_TOKEN" | docker login registry.battlenet.internal -u "$ZOT_REGISTRY_USER" --password-stdin
       # Same mutable :latest + immutable $CI_COMMIT_SHA tag scheme as the
