@@ -964,7 +964,7 @@ Two architectures need to be built: `amd64` (if any edge is x86) and `arm64` (Pi
 
 ## 12. CI/CD (Woodpecker)
 
-**Engine**: Woodpecker at `ci.battlenet.internal`, OAuth-wired to the canonical
+**Engine**: Woodpecker at `ci.battlenet.l-p.dev`, OAuth-wired to the canonical
 Forgejo repository. The actual pipeline is producer-owned even though the CI
 service itself is deployed by the consumer infrastructure repository.
 
@@ -973,26 +973,22 @@ The actual pipeline lives at [`../.woodpecker.yml`](../.woodpecker.yml) (repo ro
 **Shape**, same intent as the original design:
 - `test`: `./gradlew --no-daemon check integrationTest` in `eclipse-temurin:21-jdk-jammy`. Runs the fast unit suite and the Testcontainers integration suite on every push and PR, using the pipeline's Docker-in-Docker service via `DOCKER_HOST=tcp://docker:2375`.
 - `pr-smoke-test` (PRs only): local single-arch `docker build` + boot + `/health`/`/metrics` check, without needing registry write access.
-- `build-and-push` (`main` only): builds `linux/amd64` and `linux/arm64` images with the Docker daemon's embedded builder, pushes the per-architecture tags, then publishes their manifest list as `:latest` to the Forgejo registry. Every build is also tagged with an **immutable `$CI_COMMIT_SHA` version tag** (per-arch `:$SHA-amd64` / `:$SHA-arm64` plus a `:$SHA` manifest list) so a consumer's recorded pin survives `:latest` being overwritten and the registry's retention GC. The manifest digest is written to `digest.txt` in the shared workspace — Woodpecker has no GitHub-Actions-style `needs.<job>.outputs.<x>` mechanism, so passing the digest to the next step is a plain file, not a job output. This deliberately avoids a separate BuildKit container, whose trust store does not inherit Woodpecker's internal registry CA.
-- `publish-zot` (`main` only): re-tags the same per-architecture images (still present in the shared DinD daemon) and publishes them, plus `:latest` and `:$CI_COMMIT_SHA` manifest lists, to the dedicated Zot OCI registry at `registry.battlenet.internal/liamp/dns-ha-agent`. Kept as a separate step so a Zot outage cannot fail the canonical Forgejo publish or its digest smoke-test.
-- `smoke-test` (`main` only): pulls the image **by digest** (from `digest.txt`), boots it, polls `/health` with retry, asserts `/metrics`.
+- `publish` (`main` only): builds `linux/amd64` and `linux/arm64` images with the Docker daemon's embedded builder (with `VCS_REF` = the commit, which becomes `org.opencontainers.image.revision`), pushes the per-architecture tags, then publishes their manifest list to the Zot OCI registry, `registry.battlenet.l-p.dev/liamp/dns-ha-agent`. Every build is tagged with an **immutable `$CI_COMMIT_SHA` version tag** (per-arch `:$SHA-amd64` / `:$SHA-arm64` plus a `:$SHA` manifest list), which is what a consumer pins, and with a mutable `:latest` (and `:latest-amd64`/`-arm64`) browse pointer. The manifest digest is written to `digest.txt` in the shared workspace — Woodpecker has no GitHub-Actions-style `needs.<job>.outputs.<x>` mechanism, so passing the digest to the next step is a plain file, not a job output. Until 2026-09-16 this step published to Forgejo's package registry and a separate `publish-zot` step re-tagged the images into Zot; Forgejo's registry is retired (Battlenet progress 0227).
+- `smoke-test` (`main` only): pulls the image **by digest** (from `digest.txt`) from Zot, boots it, polls `/health` with retry, asserts `/metrics`.
 
 Docker-in-Docker is required because Woodpecker step containers don't get host Docker access by default — a `services.docker` sidecar (`docker:24-dind`, `privileged: true`) provides one, reachable at `tcp://docker:2375`. This is why the repo must be marked **trusted** in Woodpecker's own repo settings (privileged containers are opt-in per repo). `linux/arm64` additionally needs QEMU registered on an x86 runner via `tonistiigi/binfmt --install all`.
 
-**Versioning**: every main-branch commit publishes a new image to the Forgejo registry. The `:latest` tag is published as a convenience pointer for humans browsing the registry, but **deployments pin by digest** (`sha256:...`) or by the immutable `$CI_COMMIT_SHA` version tag. CI exposes the digest as a workspace file (`digest.txt`) inside the same pipeline run; there is no cross-run artifact store to read it from later, so a human rolling forward reads it from the `build-and-push` step's own log line (`Built digest: ...`) or `docker buildx imagetools inspect` against `:latest` directly.
+**Versioning**: every main-branch commit publishes a new image to Zot. The `:latest` tag is published as a convenience pointer for humans browsing the registry, but **deployments pin by digest** (`sha256:...`) or by the immutable `$CI_COMMIT_SHA` version tag. CI exposes the digest as a workspace file (`digest.txt`) inside the same pipeline run; there is no cross-run artifact store to read it from later, so a human rolling forward reads it from the `publish` step's own log line (`Published …@sha256:...`) or `docker buildx imagetools inspect` against `:latest` directly.
 
 **Rollback**: the consumer selects a previous known-good digest in its own desired state. The previous artifact remains in the registry retention window, so rollback is byte-identical to the prior production state.
 
-**Secrets** (configured in Woodpecker's per-repo secret store, not Forgejo — Woodpecker does not read Forgejo Actions secrets):
-- `forgejo_registry_user`
-- `forgejo_registry_token`
+**Secrets**: the three Woodpecker org secrets every first-party repository publishes with — `zot_push_registry`, `zot_ci_username`, `zot_ci_password` — declared by the Battlenet infra repository. They are visible to push/tag/manual events only, so pull-request pipelines hold no registry credential. No per-repo secret is used.
 
 ---
 
 ## 13. Hosting / Registry
 
-- **Registry (canonical)**: Forgejo's built-in container registry at `git.battlenet.internal/liamp/dns-ha-agent`. (No `homelab` org exists on this Forgejo instance — repos and their packages live under the `liamp` user, per the pattern documented in `docs/k3s/forgejo.md` §3 of the Battlenet infra repo.)
-- **Registry (mirror)**: the dedicated Zot OCI registry at `registry.battlenet.internal/liamp/dns-ha-agent`, populated by the `publish-zot` CI step. Zot is the homelab's first-party image store (see the Battlenet infra repo's `docs/k3s/zot.md`); the Forgejo registry remains the canonical producer source of truth for the agent image.
+- **Registry**: the Zot OCI registry at `registry.battlenet.l-p.dev/liamp/dns-ha-agent`, the homelab's only first-party image store (see the Battlenet infra repo's `docs/k3s/zot.md`). It allows no anonymous read; consumers pull as its read-only `zot-pull` identity. Forgejo's built-in container registry was the canonical store until 2026-09-16; every image it held was copied to Zot at identical digests and the registry retired (Battlenet progress 0227).
 - **Visibility**: private, owned by `liamp`.
 - **Auth**: Forgejo personal access token with `write:package` scope, stored as a Woodpecker CI secret (`forgejo_registry_token`). Zot uses its break-glass `liamp` account as `zot_registry_user`/`zot_registry_token`; a scoped Zot API key is the intended long-term CI credential. Consumers use their own read-only package credentials.
 - **Tags published**: `:latest` (rolling pointer for browse-only) and `:$CI_COMMIT_SHA` (immutable version tag, per-arch and manifest list). Deployments pin by `@sha256:DIGEST` or the immutable version tag; never by `:latest`.
