@@ -92,9 +92,10 @@ image digest
 in green Woodpecker pipeline 26. Deployment status is intentionally not tracked
 here; Battlenet is authoritative for its own live state.
 
-Forgejo (`git.battlenet.internal/liamp/HA-DNS`) is canonical. Every Forgejo
+Forgejo (`git.battlenet.l-p.dev/liamp/HA-DNS`) is canonical. Every Forgejo
 push is mirrored to GitHub (`IcyNoctiluca/HA-DNS`) by Forgejo itself, while
-Woodpecker at `ci.battlenet.internal` runs producer CI from the canonical
+Woodpecker at `ci.battlenet.l-p.dev` runs producer CI and publishes images
+to Zot (`registry.battlenet.l-p.dev/liamp/dns-ha-agent`) from the canonical
 Forgejo repository.
 
 ## Repository layout

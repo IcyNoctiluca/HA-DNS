@@ -39,7 +39,7 @@ and Forgejo mirrors every committed ref to GitHub with `sync_on_commit`; GitHub
 is a durable external copy, not a second writable source.
 
 - **`origin`** — canonical Forgejo:
-  `ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git`. It is both the
+  `ssh://git@git.battlenet.l-p.dev:30022/liamp/HA-DNS.git`. It is both the
   fetch and push remote; `main` tracks `origin/main`.
 - **`github`** — optional fetch-only reference to
   `git@github.com:IcyNoctiluca/HA-DNS.git`. Never push to it. The Forgejo
@@ -50,7 +50,7 @@ For an existing checkout that still points at GitHub, make Forgejo `origin`
 before its next fetch or push:
 
 ```bash
-git remote set-url origin ssh://git@git.battlenet.internal:30022/liamp/HA-DNS.git
+git remote set-url origin ssh://git@git.battlenet.l-p.dev:30022/liamp/HA-DNS.git
 git config --unset-all remote.origin.pushurl
 git fetch origin
 git branch --set-upstream-to=origin/main main

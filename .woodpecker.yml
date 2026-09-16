@@ -1,4 +1,4 @@
-# CI for dns-ha-agent, run by Woodpecker (ci.battlenet.internal).
+# CI for dns-ha-agent, run by Woodpecker (ci.battlenet.l-p.dev).
 #
 # Forgejo Actions is deliberately disabled on the Forgejo instance this repo
 # lives on (actions.ENABLED=false, by name — see the Battlenet infra repo's
@@ -22,6 +22,12 @@ services:
     privileged: true
     # NO `dns:` OVERRIDE HERE, DELIBERATELY, AND IT MUST NOT COME BACK
     # WITHOUT SOLVING THE PROBLEM BELOW.
+    #
+    # Still true since the registry moved to registry.battlenet.l-p.dev: the
+    # public zone holds no record for it -- only the rack's own resolvers
+    # answer that name -- so a public recursive resolver still cannot find
+    # the registry this pipeline publishes to. The account below names the
+    # zone of the time.
     #
     # `ci: give DinD a bootstrap resolver` (e0486062, 2026-09-04) set
     # `dns: [1.1.1.1, 1.0.0.1]` on this service, so that CI would not depend on
@@ -75,7 +81,7 @@ steps:
       - event: [pull_request, manual]
 
   # PR-only: proves the image still builds and boots without needing
-  # registry write access. Superseded by build-and-push + smoke-test on
+  # registry write access. Superseded by publish + smoke-test on
   # main, which pull the real pushed image by digest instead of building
   # locally a second time.
   pr-smoke-test:
@@ -148,53 +154,60 @@ steps:
     when:
       - event: pull_request
 
-  build-and-push:
+  # Builds each architecture once and publishes straight to Zot, the rack's
+  # only container registry. Forgejo's package registry is retired (Battlenet
+  # progress 0227); this step used to push there and a separate publish-zot
+  # step re-tagged the same images into Zot. The three zot_* values are the
+  # Woodpecker org secrets every first-party repository publishes with.
+  #
+  # Per-architecture builds with the daemon-embedded builder, combined with
+  # `docker manifest`, rather than `buildx build --platform a,b --push`. That
+  # was first forced by an internal-CA registry certificate a separate
+  # BuildKit container never trusted; the certificate is public now, and the
+  # shape is kept because it is proved. VCS_REF is what Battlenet's admission
+  # checks: org.opencontainers.image.revision must equal the pinned revision.
+  #
+  # Each build is tagged twice: an immutable $CI_COMMIT_SHA version tag, which
+  # is what a consumer records, and a mutable :latest browse pointer that
+  # nothing may pin.
+  #
+  # $VAR, never ${VAR}: Woodpecker substitutes ${VAR} at compile time from its
+  # own context, so a shell variable written with braces silently becomes an
+  # empty string (see smoke-test below).
+  publish:
     image: docker:24-cli
     environment:
       DOCKER_HOST: tcp://docker:2375
       DOCKER_CLI_EXPERIMENTAL: enabled
-      REGISTRY_USER:
-        from_secret: forgejo_registry_user
-      REGISTRY_TOKEN:
-        from_secret: forgejo_registry_token
+      IMAGE_REPO: liamp/dns-ha-agent
+      ZOT_REGISTRY:
+        from_secret: zot_push_registry
+      ZOT_USER:
+        from_secret: zot_ci_username
+      ZOT_PASSWORD:
+        from_secret: zot_ci_password
     commands:
       - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
-      - apk add --no-cache jq
       # linux/arm64 target (Pi 5 edges) needs QEMU emulation when building
       # on an x86 runner (H1).
       - docker run --rm --privileged tonistiigi/binfmt --install all
-      - echo "$REGISTRY_TOKEN" | docker login git.battlenet.internal -u "$REGISTRY_USER" --password-stdin
-      # Deliberately NOT `docker buildx create` + `buildx build --platform
-      # a,b --push` in one shot: that spins up a *separate* BuildKit
-      # container (docker-container driver) which is created by the dind
-      # daemon, not by Woodpecker itself, so it never gets the CA bundle
-      # Woodpecker mounts into every container IT creates -- confirmed live
-      # (docker login above succeeded; the buildx-created container's own
-      # push failed with "certificate signed by unknown authority"). Building
-      # per-arch with the default (daemon-embedded) driver and combining with
-      # `docker manifest`, below, stays entirely inside containers Woodpecker
-      # itself created, so the same CA trust that made `docker login` work
-      # applies throughout.
-      # Each build is tagged twice: the mutable :latest pointer and an
-      # immutable $CI_COMMIT_SHA version tag. :latest is a browse pointer
-      # ONLY; the version tag is the durable reference a consumer records so
-      # its pin survives the next build overwriting :latest (the retention
-      # GC'd the previously recorded digest because nothing referenced it).
-      - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" --platform linux/amd64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 -t git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64 dns-ha-agent
-      - docker push git.battlenet.internal/liamp/dns-ha-agent:latest-amd64
-      - docker push git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64
-      - docker build --build-arg VCS_REF="$CI_COMMIT_SHA" --platform linux/arm64 -f dns-ha-agent/Dockerfile -t git.battlenet.internal/liamp/dns-ha-agent:latest-arm64 -t git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64 dns-ha-agent
-      - docker push git.battlenet.internal/liamp/dns-ha-agent:latest-arm64
-      - docker push git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64
-      # :latest published as a convenience pointer ONLY. Ansible deploys pin
-      # by digest (or the immutable $CI_COMMIT_SHA tag), not by :latest.
-      - docker manifest create git.battlenet.internal/liamp/dns-ha-agent:latest git.battlenet.internal/liamp/dns-ha-agent:latest-amd64 git.battlenet.internal/liamp/dns-ha-agent:latest-arm64
-      - docker manifest create git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64 git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64
-      - docker manifest push git.battlenet.internal/liamp/dns-ha-agent:latest > /tmp/manifest-push.out
-      - docker manifest push git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA
-      - cat /tmp/manifest-push.out
-      - grep -o 'sha256:[a-f0-9]*' /tmp/manifest-push.out | head -1 > digest.txt
-      - 'echo "Built digest: $(cat digest.txt)"'
+      - echo "$ZOT_PASSWORD" | docker login "$ZOT_REGISTRY" -u "$ZOT_USER" --password-stdin
+      - |
+        set -e
+        REF="$ZOT_REGISTRY/$IMAGE_REPO"
+        for arch in amd64 arm64; do
+          docker build --build-arg VCS_REF="$CI_COMMIT_SHA" --platform "linux/$arch" -f dns-ha-agent/Dockerfile -t "$REF:$CI_COMMIT_SHA-$arch" -t "$REF:latest-$arch" dns-ha-agent
+          docker push "$REF:$CI_COMMIT_SHA-$arch"
+          docker push "$REF:latest-$arch"
+        done
+        # The immutable tag first: its digest is the release pointer.
+        docker manifest create "$REF:$CI_COMMIT_SHA" "$REF:$CI_COMMIT_SHA-amd64" "$REF:$CI_COMMIT_SHA-arm64"
+        docker manifest push "$REF:$CI_COMMIT_SHA" | tee /tmp/manifest-push.out
+        grep -o 'sha256:[a-f0-9]*' /tmp/manifest-push.out | head -1 > digest.txt
+        test -s digest.txt
+        docker manifest create "$REF:latest" "$REF:latest-amd64" "$REF:latest-arm64"
+        docker manifest push "$REF:latest"
+        echo "Published $REF@$(cat digest.txt) (tags: $CI_COMMIT_SHA, latest)"
     when:
       - event: [push, manual]
         branch: main
@@ -203,19 +216,22 @@ steps:
     image: docker:24-cli
     environment:
       DOCKER_HOST: tcp://docker:2375
-      REGISTRY_USER:
-        from_secret: forgejo_registry_user
-      REGISTRY_TOKEN:
-        from_secret: forgejo_registry_token
+      IMAGE_REPO: liamp/dns-ha-agent
+      ZOT_REGISTRY:
+        from_secret: zot_push_registry
+      ZOT_USER:
+        from_secret: zot_ci_username
+      ZOT_PASSWORD:
+        from_secret: zot_ci_password
     commands:
       - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
       - apk add --no-cache wget jq
       # `docker login` writes credentials into this container's own
       # ~/.docker/config.json, not into the shared dind daemon -- found
-      # live as "unauthorized" on pull, since build-and-push's login (a
-      # different container) doesn't carry over. The registry image is
-      # private, so every step that pulls or pushes needs its own login.
-      - echo "$REGISTRY_TOKEN" | docker login git.battlenet.internal -u "$REGISTRY_USER" --password-stdin
+      # live as "unauthorized" on pull, since the publish step's login (a
+      # different container) doesn't carry over. Zot allows no anonymous
+      # read, so every step that pulls or pushes needs its own login.
+      - echo "$ZOT_PASSWORD" | docker login "$ZOT_REGISTRY" -u "$ZOT_USER" --password-stdin
       - |
         cat > test-config.yaml <<'EOF'
         version: 1
@@ -260,7 +276,7 @@ steps:
       # already empty). `$DIGEST` (no braces) isn't Woodpecker's
       # substitution syntax, so the shell alone resolves it, at runtime, as
       # intended.
-      - DIGEST=$(cat digest.txt) && IMAGE="git.battlenet.internal/liamp/dns-ha-agent@$DIGEST" && docker pull "$IMAGE" && docker run --rm --network none -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml:ro" "$IMAGE" --check-config | grep -q '"valid":true' && docker run --rm --network none -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml:ro" "$IMAGE" --plan-routes | grep -q '"withdraw_routes":\[\]' && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
+      - DIGEST=$(cat digest.txt) && IMAGE="$ZOT_REGISTRY/$IMAGE_REPO@$DIGEST" && docker pull "$IMAGE" && docker run --rm --network none -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml:ro" "$IMAGE" --check-config | grep -q '"valid":true' && docker run --rm --network none -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml:ro" "$IMAGE" --plan-routes | grep -q '"withdraw_routes":\[\]' && docker run -d --name smoke --rm -e DNS_HA_AGENT_ALLOW_NOOP_TAILSCALE=true -v "$(pwd)/test-config.yaml:/etc/dns-ha-agent/config.yaml" "$IMAGE"
       - |
         status=1
         for i in $(seq 1 12); do
@@ -279,40 +295,6 @@ steps:
       - jq . /tmp/health.json
       - grep -q '"version"' /tmp/health.json
       - docker stop smoke
-    when:
-      - event: [push, manual]
-        branch: main
-
-  # Mirrors the Forgejo-registry images into the dedicated Zot OCI registry
-  # (registry.battlenet.internal). Re-tags the per-arch images already built
-  # and pushed by build-and-push (same shared dind daemon), pushes them, and
-  # publishes the multi-arch manifest list. Runs last so a Zot outage cannot
-  # fail the canonical Forgejo publish + digest smoke-test.
-  publish-zot:
-    image: docker:24-cli
-    environment:
-      DOCKER_HOST: tcp://docker:2375
-      ZOT_REGISTRY_USER:
-        from_secret: zot_ci_username
-      ZOT_REGISTRY_TOKEN:
-        from_secret: zot_ci_password
-    commands:
-      - 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; docker info >/dev/null'
-      - echo "$ZOT_REGISTRY_TOKEN" | docker login registry.battlenet.internal -u "$ZOT_REGISTRY_USER" --password-stdin
-      # Same mutable :latest + immutable $CI_COMMIT_SHA tag scheme as the
-      # Forgejo push; the version tag is the durable Zot reference too.
-      - docker tag git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64 registry.battlenet.internal/liamp/dns-ha-agent:latest-amd64
-      - docker tag git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64 registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64
-      - docker push registry.battlenet.internal/liamp/dns-ha-agent:latest-amd64
-      - docker push registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64
-      - docker tag git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64 registry.battlenet.internal/liamp/dns-ha-agent:latest-arm64
-      - docker tag git.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64 registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64
-      - docker push registry.battlenet.internal/liamp/dns-ha-agent:latest-arm64
-      - docker push registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64
-      - docker manifest create registry.battlenet.internal/liamp/dns-ha-agent:latest registry.battlenet.internal/liamp/dns-ha-agent:latest-amd64 registry.battlenet.internal/liamp/dns-ha-agent:latest-arm64
-      - docker manifest create registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-amd64 registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA-arm64
-      - docker manifest push registry.battlenet.internal/liamp/dns-ha-agent:latest
-      - docker manifest push registry.battlenet.internal/liamp/dns-ha-agent:$CI_COMMIT_SHA
     when:
       - event: [push, manual]
         branch: main

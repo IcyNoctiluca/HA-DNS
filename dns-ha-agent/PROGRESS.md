@@ -14,6 +14,18 @@ digest smoke-test. The immutable image digest is
 This log records producer evidence only; older host/deployment entries are
 historical and must not be used as current desired or live state.
 
+**2026-09-16 — publish to Zot only:** the pipeline's `build-and-push`
+(Forgejo's package registry) and `publish-zot` (re-tag into Zot) steps are
+now one `publish` step that pushes straight to
+`registry.battlenet.l-p.dev/liamp/dns-ha-agent` with the standard `zot_*` org
+secrets; `smoke-test` pulls the published digest from Zot. Both old steps still
+logged in to `*.battlenet.internal`, a zone Battlenet retired on 2026-09-14,
+so no main push could have published since. Forgejo's registry is retired
+and its images copied to Zot at identical digests (Battlenet progress 0227);
+the per-repo `forgejo_registry_*` secrets are no longer read. BLUEPRINT
+§12/§13 updated; the remote URL in AGENTS/README moved to the
+`battlenet.l-p.dev` zone.
+
 **2026-09-04 — Forgejo canonical, GitHub retained as a verified outbound
 mirror:** the source-of-truth transition is complete. `liamp/HA-DNS` on Forgejo
 now owns normal fetches, pushes and PRs; Forgejo's `sync_on_commit` SSH push
